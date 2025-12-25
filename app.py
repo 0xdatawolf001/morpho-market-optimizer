@@ -275,6 +275,8 @@ st.info("""
 Please use [Monarch lend](https://www.monarchlend.xyz/markets) to find the markets you need. 
 This page assumes that your budgets and optimizations are in USD stables. 
 **DO NOT USE IT FOR NON-USD STABLES**
+        
+You can add in market ID across multi-chains. Chain coverage is the same as Monarch. You can technically do multi-assets only for USD stables (DAI, USDC, USDT etc)
 """)
 
 # --- Sidebar Inputs ---
