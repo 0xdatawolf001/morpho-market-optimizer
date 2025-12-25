@@ -269,6 +269,13 @@ class MarketOptimizer:
 
 st.title("🤖 Morpho Market Optimizer")
 
+# Inserted text block
+st.info("""
+Please use [Monarch lend](https://www.monarchlend.xyz/markets) to find the markets you need. 
+This page assumes that your budgets and optimizations are in USD stables. 
+**DO NOT USE IT FOR NON-USD STABLES**
+""")
+
 # --- Sidebar Inputs ---
 st.sidebar.header("Configuration")
 total_budget = st.sidebar.number_input("Total Budget (USD)", value=10000.0, step=1000.0)
