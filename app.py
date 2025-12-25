@@ -266,7 +266,18 @@ st.dataframe(
     df_filtered,
     use_container_width=True,
     hide_index=True,
-    column_order=["Market ID", "Chain", "Loan Token", "Collateral"],
+    column_order=["Chain", "Loan Token", "Collateral", "Market ID"],
+    column_config={
+        "Market ID": st.column_config.TextColumn(
+            "Market ID",
+            width="large",
+            help="Click to copy"
+        ),
+        "Chain": st.column_config.TextColumn(
+            "Chain",
+            width="small"
+        )
+    }
 )
 
 
@@ -285,16 +296,21 @@ with col_scope:
     raw_ids = st.text_area(
         "Paste Market IDs to optimize (one per line)", 
         value="", 
-        height=300, 
-        placeholder="""0xfea758e88403739fee1113b26623f43d3c37b51dc1e1e8231b78b23d1404e439 (Market ID)
-0xf8c13c80ab8666c21fc5afa13105745cae7c1da13df596eb5054319f36655cc9"""
+        height=300,
+        placeholder="0xfea758e88403739fee1113b26623f43d3c37b51dc1e1e8231b78b23d1404e439\n0xf8c13c80ab8666c21fc5afa13105745cae7c1da13df596eb5054319f36655cc9",
+        help="💡 Copy Market IDs from the filtered table above. The optimizer will find the best allocation across these markets."
     )
     clean_ids = list(set([x.strip().lower() for x in raw_ids.replace(',', '\n').split('\n') if x.strip()]))
     df_selected = df_all[df_all['Market ID'].str.lower().isin(clean_ids)].copy()
 
 with col_cash:
     st.subheader("3. Budget")
-    new_cash = st.number_input("Additional New Cash (USD)", value=0.0, step=1000.0)
+    new_cash = st.number_input(
+        "Additional New Cash (USD)", 
+        value=0.0, 
+        step=1000.0,
+        help="💡 This is fresh capital you want to deploy. Set to $0 if only rebalancing existing positions."
+    )
 
 if not df_selected.empty:
     st.info("💡 Enter your current USD holdings for the selected markets below:")
