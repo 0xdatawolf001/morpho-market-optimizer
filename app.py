@@ -28,6 +28,7 @@ CHAIN_ID_TO_NAME = {
     143: "Monad",
     8453: "Base",
     42161: "Arbitrum",
+    999: "HyperEVM"
 }
 
 # Default IDs from your script for the UI input
