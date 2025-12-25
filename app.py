@@ -32,7 +32,7 @@ CHAIN_ID_TO_NAME = {
 
 # Default IDs from your script for the UI input
 DEFAULT_IDS = """
-0xc7d717f4052ac4e5463dcc58cea0f6b05dd7d8c67e0aee68ebe30a8af09b259f
+0xc7d717f4052ac4e5463dcc58cea0f6b05dd7d8c67e0aee68ebe30a8af09b259f, 
 0xa35d91efb3e284a0ab7098e8c5a65caf58ea0451073e36a544a821fd8f350953
 """.strip()
 
