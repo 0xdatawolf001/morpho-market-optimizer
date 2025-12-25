@@ -370,6 +370,7 @@ if not df_selected.empty:
                 
                 results.append({
                     "Market": f"{m['Loan Token']} / {m['Collateral']}",
+                    "Chain": m['Chain'], 
                     "Action": action,
                     "Current ($)": m['existing_balance_usd'],
                     "Target ($)": target_alloc,
