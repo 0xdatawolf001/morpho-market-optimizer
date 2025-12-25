@@ -7,49 +7,29 @@ from scipy.optimize import minimize
 import time
 
 # ==========================================
-# 0. STREAMLIT CONFIG & CONSTANTS
+# 0. CONFIG & CONSTANTS
 # ==========================================
-st.set_page_config(page_title="Morpho Market Optimizer", layout="wide")
+st.set_page_config(page_title="Morpho Rebalance", layout="wide")
 
 MORPHO_API_URL = "https://api.morpho.org/graphql"
 BATCH_SIZE = 1000
-
-# Constants for Morpho Math
 WAD = 1e18
 TARGET_UTILIZATION = 0.9
 CURVE_STEEPNESS = 4.0
 SECONDS_PER_YEAR = 31536000
 
 CHAIN_ID_TO_NAME = {
-    1: "Ethereum",
-    10: "Optimism",
-    130: "Unichain",
-    137: "Polygon",
-    143: "Monad",
-    8453: "Base",
-    42161: "Arbitrum",
-    999: "HyperEVM"
+    1: "Ethereum", 10: "Optimism", 130: "Unichain", 137: "Polygon",
+    143: "Monad", 8453: "Base", 42161: "Arbitrum", 999: "HyperEVM",
+    747474: "Katana", 988: "Stable", 98866: "Plume"
 }
 
-# Default IDs from your script for the UI input
-DEFAULT_IDS = """
-0x64d65c9a2d91c36d56fbc42d69e979335320169b3df63bf92789e2c8883fcc64, 
-0x9103c3b4e834476c9a62ea009ba2c884ee42e94e6e314a26f04d312434191836,
-0xa8c2e5b31d1f3fb6c000bd49355d091f71e7c866fcb74a1cb2562ef67157bc2a,
-0xe79e0d1f753be4cfb44b04d790d4f66d6b5ca34aa3b83d51f69f1ce50b98dd8e,
-0x7717f1e04510390518811b3133ea47c298094ddd1d806ed8f8867d88c727bad7,
-0x964e7d1db11bdf32262c71274c297dcdb4710d73acb814f04fdca8b0c7cdf028,
-0x5ef35fe4418a6bcfcc70fe32efce30074f22e9a782f81d432c1e537ddbda11e2,
-0xe35c5abc6418b6319b014e07aa3c86163a870a957284128f03cf7a9e414f8899,
-0xbc3e3ac4b896a999b2943273f3ed121238a4da4218d4e48533739c0f4b43253e
-""".strip()
-
 # ==========================================
-# 1. MATH HELPERS (Unchanged)
+# 1. MATH HELPERS
 # ==========================================
 
 def apy_to_rate_per_second(apy_float: float) -> float:
-    if apy_float == 0: return 0.0
+    if apy_float <= 0: return 0.0
     return math.log(apy_float + 1) / SECONDS_PER_YEAR
 
 def rate_per_second_to_apy(rate: float) -> float:
@@ -65,112 +45,53 @@ def compute_curve_multiplier(utilization: float) -> float:
         return (CURVE_STEEPNESS - 1) * error_ratio + 1
 
 # ==========================================
-# 2. DATA FETCHING (Cached)
+# 2. DATA FETCHING
 # ==========================================
 
-@st.cache_data(ttl=3600)
-def get_all_morpho_markets():
-    """
-    Retrieves ALL Morpho markets via GraphQL. Cached by Streamlit.
-    """
-    # Query template
+def get_market_dictionary():
     query = """
     query GetAllMarkets($first: Int, $skip: Int) {
       markets(first: $first, skip: $skip) {
         items {
           uniqueKey
-          whitelisted
-          lltv
-          oracleAddress
-          irmAddress
-          loanAsset {
-            address
-            symbol
-            name
-            decimals
-            chain { id }
-          }
-          collateralAsset {
-            address
-            symbol
-            name
-            decimals
-          }
+          loanAsset { symbol decimals chain { id } }
+          collateralAsset { symbol }
         }
       }
     }
     """
-
-    all_markets_raw = []
+    all_items = []
     skip = 0
-    status_text = st.empty()
-
+    load_status = st.empty()
+    
     while True:
-        status_text.text(f"Fetching batch starting at index {skip}...")
+        load_status.info(f"⏳ Indexing Morpho Markets... {len(all_items)} found.")
+        resp = requests.post(MORPHO_API_URL, json={'query': query, 'variables': {"first": BATCH_SIZE, "skip": skip}})
+        data = resp.json()['data']['markets']['items']
+        if not data: break
+        all_items.extend(data)
+        if len(data) < BATCH_SIZE: break
+        skip += BATCH_SIZE
         
-        variables = {"first": BATCH_SIZE, "skip": skip}
-
-        try:
-            response = requests.post(MORPHO_API_URL, json={'query': query, 'variables': variables})
-            response.raise_for_status()
-            data = response.json()
-            
-            batch_items = data['data']['markets']['items']
-            
-            if not batch_items:
-                break
-                
-            all_markets_raw.extend(batch_items)
-            
-            if len(batch_items) < BATCH_SIZE:
-                break
-                
-            skip += BATCH_SIZE
-            time.sleep(0.1) 
-
-        except Exception as e:
-            st.error(f"API Request failed: {e}")
-            break
-            
-    status_text.empty() # Clear status
-
-    # Process data
-    processed_data = []
-    for market in all_markets_raw:
-        loan_asset = market.get('loanAsset') or {}
-        collateral_asset = market.get('collateralAsset') or {}
-        chain_info = loan_asset.get('chain') or {}
-        
-        chain_id = chain_info.get('id')
-        chain_name = CHAIN_ID_TO_NAME.get(chain_id, f"Unknown ({chain_id})")
-
-        raw_lltv = market.get('lltv')
-        formatted_lltv = float(raw_lltv) / 10**18 if raw_lltv else 0.0
-
-        entry = {
-            "market_id": market.get('uniqueKey'),
-            "chain_id": chain_id,
-            "chain_name": chain_name,
-            "lltv_display": formatted_lltv,
-            "loan_token_symbol": loan_asset.get('symbol'),
-            "loan_token_decimals": loan_asset.get('decimals'),
-            "collateral_token_symbol": collateral_asset.get('symbol'),
-        }
-        processed_data.append(entry)
-
-    return pd.DataFrame(processed_data)
-
-def fetch_live_market_details(market_df):
-    """
-    Fetches live supply/borrow/apy stats for specific markets.
-    Not cached heavily as we want fresh rates for optimization.
-    """
-    market_data = []
+    load_status.empty()
     
-    progress_bar = st.progress(0)
-    total = len(market_df)
-    
-    for i, (index, row) in enumerate(market_df.iterrows()):
+    processed = []
+    for m in all_items:
+        loan = m.get('loanAsset') or {}
+        processed.append({
+            "Market ID": m['uniqueKey'],
+            "Chain": CHAIN_ID_TO_NAME.get(loan.get('chain', {}).get('id'), "Other"),
+            "Loan Token": loan.get('symbol'),
+            "Collateral": (m.get('collateralAsset') or {}).get('symbol'),
+            "Decimals": loan.get('decimals'),
+            "ChainID": loan.get('chain', {}).get('id')
+        })
+    return pd.DataFrame(processed)
+
+def fetch_live_market_details(selected_df):
+    details = []
+    my_bar = st.progress(0, text="Fetching real-time yields...")
+    for i, (_, row) in enumerate(selected_df.iterrows()):
         query = """
         query GetMarketData($uniqueKey: String!, $chainId: Int!) {
             marketByUniqueKey(uniqueKey: $uniqueKey, chainId: $chainId) {
@@ -178,223 +99,296 @@ def fetch_live_market_details(market_df):
             }
         }
         """
-        
-        try:
-            response = requests.post(MORPHO_API_URL, json={
-                'query': query, 
-                'variables': {"uniqueKey": row['market_id'], "chainId": int(row['chain_id'])}
+        r = requests.post(MORPHO_API_URL, json={'query': query, 'variables': {"uniqueKey": row['Market ID'], "chainId": int(row['ChainID'])}}).json().get('data', {}).get('marketByUniqueKey')
+        if r:
+            state = r['state']
+            sup, bor = float(state['supplyAssets']), float(state['borrowAssets'])
+            util = bor / sup if sup > 0 else 0
+            curr_rate_sec = apy_to_rate_per_second(float(state['borrowApy']))
+            mult = compute_curve_multiplier(util)
+            details.append({
+                **row.to_dict(),
+                'raw_supply': sup, 'raw_borrow': bor,
+                'fee': float(state['fee']) / WAD,
+                'rate_at_target': (curr_rate_sec / mult if mult > 0 else 0),
+                'current_supply_apy': float(state['supplyApy'])
             })
-            raw = response.json()
-            data = raw.get('data', {}).get('marketByUniqueKey')
-            
-            if data:
-                state = data['state']
-                supply_assets = float(state['supplyAssets'])
-                borrow_assets = float(state['borrowAssets'])
-                fee_percent = float(state['fee']) / WAD
-                curr_borrow_apy = float(state['borrowApy'])
-                curr_supply_apy = float(state['supplyApy'])
-                
-                # Math preparation
-                current_utilization = borrow_assets / supply_assets if supply_assets > 0 else 0
-                curr_rate_per_sec = apy_to_rate_per_second(curr_borrow_apy)
-                curve_mult = compute_curve_multiplier(current_utilization)
-                rate_at_target = (curr_rate_per_sec / curve_mult) if curve_mult != 0 else 0
-
-                pair_name = f"{row['loan_token_symbol']} / {row['collateral_token_symbol']}"
-
-                market_data.append({
-                    'id': row['market_id'],
-                    'chain': row['chain_id'],
-                    'chain_name': row['chain_name'],
-                    'pair_name': pair_name,
-                    'decimals': row['loan_token_decimals'],
-                    'raw_supply': supply_assets,
-                    'raw_borrow': borrow_assets,
-                    'fee': fee_percent,
-                    'rate_at_target': rate_at_target,
-                    'current_supply_apy': curr_supply_apy
-                })
-        except Exception as e:
-            st.warning(f"Failed to fetch details for {row['market_id']}: {e}")
-
-        progress_bar.progress((i + 1) / total)
-        
-    progress_bar.empty()
-    return market_data
+        my_bar.progress((i + 1) / len(selected_df))
+    my_bar.empty()
+    return details
 
 # ==========================================
-# 3. OPTIMIZER CLASS
+# 3. OPTIMIZER
 # ==========================================
 
-class MarketOptimizer:
-    def __init__(self, budget, market_data_list):
-        self.budget = budget
-        self.market_data = market_data_list
+class RebalanceOptimizer:
+    def __init__(self, total_budget, market_list):
+        self.total_budget = total_budget 
+        self.markets = market_list
 
-    def calculate_new_metrics(self, market, alloc_usd):
-        alloc_wei = alloc_usd * (10 ** market['decimals'])
-        new_supply_wei = market['raw_supply'] + alloc_wei
+    def simulate_apy(self, market, user_new_alloc_usd):
+        user_existing_wei = market['existing_balance_usd'] * (10**market['Decimals'])
+        other_users_supply_wei = max(0, market['raw_supply'] - user_existing_wei)
+        simulated_total_supply_wei = other_users_supply_wei + (user_new_alloc_usd * (10**market['Decimals']))
         
-        if new_supply_wei == 0: return 0.0
-
-        new_util = market['raw_borrow'] / new_supply_wei
+        if simulated_total_supply_wei <= 0: return 0.0
+        new_util = market['raw_borrow'] / simulated_total_supply_wei
         new_mult = compute_curve_multiplier(new_util)
         new_borrow_rate = market['rate_at_target'] * new_mult
         new_supply_rate = new_borrow_rate * new_util * (1 - market['fee'])
         return rate_per_second_to_apy(new_supply_rate)
 
-    def objective_function(self, allocations):
-        total_yield_usd = 0.0
-        for i, alloc_usd in enumerate(allocations):
-            market = self.market_data[i]
-            new_apy = self.calculate_new_metrics(market, alloc_usd)
-            total_yield_usd += (alloc_usd * new_apy)
-        return -total_yield_usd
+    def objective(self, x):
+        total_yield = 0
+        for i, alloc in enumerate(x):
+            total_yield += (alloc * self.simulate_apy(self.markets[i], alloc))
+        return -total_yield
 
-    def run_optimization(self):
-        num_markets = len(self.market_data)
-        if num_markets == 0:
-            return None, None
-            
-        initial_guess = [self.budget / num_markets] * num_markets
-        constraints = ({'type': 'eq', 'fun': lambda x: np.sum(x) - self.budget})
-        bounds = tuple((0, self.budget) for _ in range(num_markets))
-
-        result = minimize(
-            self.objective_function,
-            initial_guess,
-            method='SLSQP',
-            bounds=bounds,
-            constraints=constraints,
-            options={'maxiter': 100}
-        )
-        return result.x, result.success
+    def optimize(self):
+        n = len(self.markets)
+        res = minimize(self.objective, [self.total_budget/n]*n, method='SLSQP', 
+                       bounds=[(0, self.total_budget)]*n, 
+                       constraints=({'type': 'eq', 'fun': lambda x: np.sum(x)-self.total_budget}))
+        return res.x if res.success else None
 
 # ==========================================
 # 4. STREAMLIT UI
 # ==========================================
+if "balance_cache" not in st.session_state:
+    st.session_state.balance_cache = {}
 
-st.title("🤖 Morpho Market Optimizer")
+st.title("⚖️ Morpho Portfolio Optimizer")
 
-# Inserted text block
-st.info("""
-Please use [Monarch lend](https://www.monarchlend.xyz/markets) to find the markets you need. 
-This page assumes that your budgets and optimizations are in USD stables. 
-**DO NOT USE IT FOR NON-USD STABLES**
+# --- DATA INDEXING ---
+if "market_dict" not in st.session_state:
+    st.session_state.market_dict = get_market_dictionary()
+
+df_all = st.session_state.market_dict
+
+st.subheader("1. Market Discovery")
+st.caption("Use the filters below to narrow down markets, then copy Market IDs for optimization.")
+
+# ==========================================
+# ADD MULTI-SELECT FILTERS HERE
+# ==========================================
+
+# Prepare token display names with truncated addresses
+def create_token_display(df, token_col, address_col='Market ID'):
+    """Create display names with truncated addresses for duplicate token names"""
+    token_data = []
+    for _, row in df.iterrows():
+        token_name = row[token_col]
+        market_id = row[address_col]
+        # Truncate address to first 6 chars (0x + 4 chars)
+        truncated = market_id[:6] if pd.notna(market_id) else ""
         
-You can add in market ID across multi-chains. Chain coverage is the same as Monarch. 
-You can technically do multi-assets only for USD stables (DAI, USDC, USDT etc).
-This tool mostly relies on the user to add in appropriate markets, so you are whitelisting yourself
-""")
+        # Handle null/blank token names
+        if pd.isna(token_name) or str(token_name).strip() == "":
+            display_name = f"({truncated})"
+            sort_key = f"zzz_{truncated}"  # Sort unnamed tokens last
+        else:
+            display_name = f"{token_name} ({truncated})"
+            sort_key = token_name.lower()
+        
+        token_data.append({
+            'display_name': display_name,
+            'token_name': token_name,
+            'market_id': market_id,
+            'sort_key': sort_key
+        })
+    return token_data
 
-# --- Sidebar Inputs ---
-st.sidebar.header("Configuration")
-total_budget = st.sidebar.number_input("Total Budget (USD)", value=10000.0, step=1000.0)
+# Create lookup dictionaries for loan and collateral tokens
+loan_token_data = create_token_display(df_all, 'Loan Token')
+collateral_token_data = create_token_display(df_all, 'Collateral')
 
-st.sidebar.subheader("Target Market IDs")
-st.sidebar.caption("Paste IDs separated by newlines or commas")
-raw_ids = st.sidebar.text_area("Market IDs", value=DEFAULT_IDS, height=150)
+# Get unique display names (sorted)
+unique_loan_displays = sorted(list(set([x['display_name'] for x in loan_token_data])), 
+                               key=lambda x: next(d['sort_key'] for d in loan_token_data if d['display_name'] == x))
+unique_collateral_displays = sorted(list(set([x['display_name'] for x in collateral_token_data])), 
+                                     key=lambda x: next(d['sort_key'] for d in collateral_token_data if d['display_name'] == x))
+unique_chains = sorted(df_all['Chain'].dropna().unique().tolist())
 
-# Process ID input
-clean_ids = [x.strip() for x in raw_ids.replace(',', '\n').split('\n') if x.strip()]
+# Display filters in three columns
+filter_col1, filter_col2, filter_col3 = st.columns(3)
 
-# --- Main Logic ---
+with filter_col1:
+    selected_chains = st.multiselect(
+        "Filter by Chain",
+        options=unique_chains,
+        default=[],
+        placeholder="Select chains..."
+    )
 
-# 1. Load Dictionary
-with st.spinner("Loading Market Dictionary..."):
-    df_all_markets = get_all_morpho_markets()
+with filter_col2:
+    selected_loan_tokens = st.multiselect(
+        "Filter by Loan Token",
+        options=unique_loan_displays,
+        default=[],
+        placeholder="Select loan tokens..."
+    )
 
-# 2. Filter DataFrame
-if not clean_ids:
-    st.warning("Please enter at least one Market ID in the sidebar.")
-    st.stop()
+with filter_col3:
+    selected_collateral_tokens = st.multiselect(
+        "Filter by Collateral Token",
+        options=unique_collateral_displays,
+        default=[],
+        placeholder="Select collateral tokens..."
+    )
 
-# Case-insensitive match
-mask = df_all_markets['market_id'].str.lower().isin([x.lower() for x in clean_ids])
-df_candidate = df_all_markets[mask].copy()
+# Apply filters to dataframe
+df_filtered = df_all.copy()
 
-# Show found vs missing
-found_ids = set(df_candidate['market_id'].str.lower())
-missing = [x for x in clean_ids if x.lower() not in found_ids]
+# Filter by chain
+if selected_chains:
+    df_filtered = df_filtered[df_filtered['Chain'].isin(selected_chains)]
 
-if missing:
-    st.error(f"Could not find {len(missing)} IDs in the API data.")
-    with st.expander("See missing IDs"):
-        st.write(missing)
+# Filter by loan token (match against display names)
+if selected_loan_tokens:
+    # Extract market IDs from selected display names
+    selected_loan_market_ids = [d['market_id'] for d in loan_token_data 
+                                if d['display_name'] in selected_loan_tokens]
+    df_filtered = df_filtered[df_filtered['Market ID'].isin(selected_loan_market_ids)]
 
-st.subheader(f"Selected Markets ({len(df_candidate)})")
-st.dataframe(df_candidate[['chain_name', 'loan_token_symbol', 'collateral_token_symbol', 'lltv_display', 'market_id']], use_container_width=True)
+# Filter by collateral token (match against display names)
+if selected_collateral_tokens:
+    # Extract market IDs from selected display names
+    selected_collateral_market_ids = [d['market_id'] for d in collateral_token_data 
+                                      if d['display_name'] in selected_collateral_tokens]
+    df_filtered = df_filtered[df_filtered['Market ID'].isin(selected_collateral_market_ids)]
 
-# 3. Action Button
-if st.button("🚀 Fetch Live Data & Optimize Allocation", type="primary"):
+# Display filtered results count
+st.caption(f"📊 Showing {len(df_filtered)} of {len(df_all)} markets")
+
+# Display the filtered dataframe
+st.dataframe(
+    df_filtered,
+    use_container_width=True,
+    hide_index=True,
+    column_order=["Market ID", "Chain", "Loan Token", "Collateral"],
+)
+
+
+# ==========================================
+# END OF FILTER SECTION
+# ==========================================
+
+st.divider()
+
+# --- UI SECTION 2: SCOPE & REBALANCE ---
+col_scope, col_cash = st.columns([2, 1])
+
+with col_scope:
+    st.subheader("2. Your Portfolio Scope")
+    # Increased height from 100 to 300 to fit ~10+ lines
+    raw_ids = st.text_area(
+        "Paste Market IDs to optimize (one per line)", 
+        value="", 
+        height=300, 
+        placeholder="""0xfea758e88403739fee1113b26623f43d3c37b51dc1e1e8231b78b23d1404e439 (Market ID)
+0xf8c13c80ab8666c21fc5afa13105745cae7c1da13df596eb5054319f36655cc9"""
+    )
+    clean_ids = list(set([x.strip().lower() for x in raw_ids.replace(',', '\n').split('\n') if x.strip()]))
+    df_selected = df_all[df_all['Market ID'].str.lower().isin(clean_ids)].copy()
+
+with col_cash:
+    st.subheader("3. Budget")
+    new_cash = st.number_input("Additional New Cash (USD)", value=0.0, step=1000.0)
+
+if not df_selected.empty:
+    st.info("💡 Enter your current USD holdings for the selected markets below:")
     
-    if df_candidate.empty:
-        st.error("No valid markets selected.")
-        st.stop()
+    # Persistent balance logic
+    df_selected['Existing Balance (USD)'] = df_selected['Market ID'].apply(lambda x: st.session_state.balance_cache.get(x, 0.0))
+    
+    edited_df = st.data_editor(
+        df_selected[['Market ID', 'Loan Token', 'Collateral', 'Existing Balance (USD)']],
+        column_config={"Existing Balance (USD)": st.column_config.NumberColumn(format="$%.2f")},
+        disabled=['Market ID', 'Loan Token', 'Collateral'],
+        use_container_width=True, hide_index=True, key="portfolio_editor"
+    )
 
-    # A. Fetch Live Data
-    with st.status("Fetching live on-chain data..."):
-        market_data_list = fetch_live_market_details(df_candidate)
-        if not market_data_list:
-            st.error("Could not fetch live data for selected markets (likely 0 liquidity).")
-            st.stop()
-            
-    # B. Run Optimizer
-    optimizer = MarketOptimizer(total_budget, market_data_list)
-    final_allocations, success = optimizer.run_optimization()
+    for _, row in edited_df.iterrows():
+        st.session_state.balance_cache[row['Market ID']] = row['Existing Balance (USD)']
 
-    if not success:
-        st.error("Optimization failed to converge.")
-    else:
-        # C. Format Results
-        st.divider()
-        st.subheader("Optimization Results")
+    current_wealth = edited_df['Existing Balance (USD)'].sum()
+    total_optimizable = current_wealth + new_cash
 
-        results_data = []
-        total_projected_yield = 0.0
 
-        for i, alloc in enumerate(final_allocations):
-            market = market_data_list[i]
-            new_apy = optimizer.calculate_new_metrics(market, alloc)
-            old_apy = market['current_supply_apy']
-            yield_usd = alloc * new_apy
-            total_projected_yield += yield_usd
-            
-            # Formating for table
-            results_data.append({
-                "Chain": market['chain_name'],
-                "Pair": market['pair_name'],
-                "Allocation ($)": alloc,
-                "Allocation (%)": (alloc / total_budget),
-                "Current APY": old_apy,
-                "New APY (Diluted)": new_apy,
-                "Proj. Yield ($/yr)": yield_usd,
-                "Market ID": market['id']
-            })
-
-        df_results = pd.DataFrame(results_data)
-        
-        # Calculate Blended APY
-        blended_apy = (total_projected_yield / total_budget) if total_budget > 0 else 0
-
-        # Metrics Row
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Total Budget", f"${total_budget:,.2f}")
-        col2.metric("Est. Annual Yield", f"${total_projected_yield:,.2f}")
-        col3.metric("Blended APY", f"{blended_apy:.4%}")
-
-        # Final Table
-        st.dataframe(
-            df_results.style.format({
-                "Allocation ($)": "${:,.2f}",
-                "Allocation (%)": "{:.1%}",
-                "Current APY": "{:.4%}",
-                "New APY (Diluted)": "{:.4%}",
-                "Proj. Yield ($/yr)": "${:,.2f}"
-            }),
-            use_container_width=True,
-            height=400
+    # ==========================================
+    # LIVE METRICS DISPLAY
+    # ==========================================
+    st.divider()
+    metric_col1, metric_col2, metric_col3 = st.columns(3)
+    
+    with metric_col1:
+        st.metric(
+            label="💰 Total Current Balance",
+            value=f"${current_wealth:,.2f}",
+            help="Sum of all existing balances entered above"
         )
+    
+    with metric_col2:
+        st.metric(
+            label="💵 Additional cash to invest",
+            value=f"${new_cash:,.2f}",
+            help="New cash entered in Budget section"
+        )
+    
+    with metric_col3:
+        st.metric(
+            label="📊 Total Balance",
+            value=f"${total_optimizable:,.2f}",
+            delta=f"${new_cash:,.2f}" if new_cash > 0 else None,
+            delta_color="normal",
+            help="Current Balance + Fresh Cash = Total available for optimization"
+        )
+    
+    st.divider()
 
+    if st.button("🚀 Run Optimization", type="primary", use_container_width=True):
+        market_data_list = fetch_live_market_details(df_selected)
+        for m in market_data_list:
+            m['existing_balance_usd'] = st.session_state.balance_cache.get(m['Market ID'], 0.0)
 
+        opt = RebalanceOptimizer(total_optimizable, market_data_list)
+        allocations = opt.optimize()
+
+        if allocations is not None:
+            st.divider()
+            results = []
+            total_yield = 0
+            for i, target_alloc in enumerate(allocations):
+                m = market_data_list[i]
+                new_apy = opt.simulate_apy(m, target_alloc)
+                net_move = target_alloc - m['existing_balance_usd']
+                total_yield += (target_alloc * new_apy)
+                
+                # EMOJI ONLY ACTION
+                action = "🟢 DEPOSIT" if net_move > 0.01 else ("🔴 WITHDRAW" if net_move < -0.01 else "⚪ HOLD")
+                
+                results.append({
+                    "Market": f"{m['Loan Token']} / {m['Collateral']}",
+                    "Action": action,
+                    "Current ($)": m['existing_balance_usd'],
+                    "Target ($)": target_alloc,
+                    "Net Move ($)": net_move,
+                    "Current APY": m['current_supply_apy'],
+                    "New APY": new_apy,
+                    "Market ID": m['Market ID']
+                })
+            
+            df_res = pd.DataFrame(results)
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Blended APY", f"{(total_yield/total_optimizable):.4%}")
+            c2.metric("Annual Interest", f"${total_yield:,.2f}")
+            c3.metric("Total Wealth", f"${total_optimizable:,.2f}")
+
+            st.dataframe(
+                df_res.style.format({
+                    "Current ($)": "${:,.2f}", "Target ($)": "${:,.2f}", "Net Move ($)": "${:,.2f}",
+                    "Current APY": "{:.4%}", "New APY": "{:.4%}"
+                }), use_container_width=True, hide_index=True
+            )
+else:
+    st.warning("Add Market IDs to section 2 to begin rebalancing.")
