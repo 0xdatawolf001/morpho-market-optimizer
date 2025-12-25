@@ -167,6 +167,7 @@ df_all = st.session_state.market_dict
 
 st.subheader("1. Market Discovery")
 st.caption("Use the filters below to narrow down markets, then copy Market IDs for optimization.")
+st.textg("The tool assumes that you have selected a candidate list of markets. The tool assumes USD stables = 1 USD and only works for USD stables. Do not use for any other loan token. The tool also assumes that you have sensibly chosen the pools you are comfortable to invest in")
 
 # ==========================================
 # ADD MULTI-SELECT FILTERS HERE
@@ -299,7 +300,7 @@ if not df_selected.empty:
     st.info("💡 Enter your current USD holdings for the selected markets below:")
     
     # Persistent balance logic
-    df_selected['Existing Balance (USD)'] = df_selected['Market ID'].apply(lambda x: st.session_state.balance_cache.get(x, 0.0))
+    df_selected['Existing Balance (USD) | Click cell to fill values'] = df_selected['Market ID'].apply(lambda x: st.session_state.balance_cache.get(x, 0.0))
     
     edited_df = st.data_editor(
         df_selected[['Market ID', 'Loan Token', 'Collateral', 'Existing Balance (USD)']],
