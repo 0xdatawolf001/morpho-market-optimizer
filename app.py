@@ -300,7 +300,7 @@ if not df_selected.empty:
     st.info("💡 Enter your current USD holdings for the selected markets below:")
     
     # Persistent balance logic
-    df_selected['Existing Balance (USD) | Click cell to fill values'] = df_selected['Market ID'].apply(lambda x: st.session_state.balance_cache.get(x, 0.0))
+    df_selected['Existing Balance (USD)'] = df_selected['Market ID'].apply(lambda x: st.session_state.balance_cache.get(x, 0.0))
     
     edited_df = st.data_editor(
         df_selected[['Market ID', 'Loan Token', 'Collateral', 'Existing Balance (USD)']],
