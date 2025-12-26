@@ -475,7 +475,7 @@ if not df_selected.empty:
             # Row 1: High-level Summary (2 columns)
             r1_c1, r1_c2 = st.columns(2)
             r1_c1.metric("Blended APY", f"{(total_yield/total_optimizable):.4%}")
-            r1_c2.metric("Total Wealth", f"${total_optimizable+total_yield:,.2f}")
+            r1_c2.metric("Total Wealth (After 1 Year)", f"${total_optimizable+total_yield:,.2f}")
 
             st.divider() # Optional: adds a visual line between summary and breakdown
 
