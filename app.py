@@ -316,8 +316,14 @@ df_filtered = df_filtered[
 ]
 
 # --- RESULTS DISPLAY ---
+# Create a copy for display so we don't alter the actual data used in the optimizer
+df_display = df_filtered.copy()
+
+# Transform decimal APY (0.05) to percentage points (5.00) for display
+df_display['Supply APY'] = df_display['Supply APY'] * 100 
+
 st.dataframe(
-    df_filtered,
+    df_display,
     use_container_width=True,
     hide_index=True,
     column_order=[
@@ -328,8 +334,16 @@ st.dataframe(
     ],
     column_config={
         "Whitelisted": st.column_config.CheckboxColumn("Whitelisted?"),
-        "Supply APY": st.column_config.NumberColumn("Supply APY", format="%.4f%%"),
-        "Utilization": st.column_config.NumberColumn("Utilization", format="%.2f%%"),
+        "Supply APY": st.column_config.NumberColumn(
+            "Supply APY", 
+            format="%.2f%%",
+            help="Annual Percentage Yield (Percentage)"
+        ),
+        "Utilization": st.column_config.NumberColumn(
+            "Utilization", 
+            format="%.2f%%",
+            help="Current market utilization"
+        ),
         "Total Supply (USD)": st.column_config.NumberColumn("Total Supply (USD)", format="$%.0f"),
         "Total Borrow (USD)": st.column_config.NumberColumn("Total Borrow (USD)", format="$%.0f"),
         "Available Liquidity (USD)": st.column_config.NumberColumn("Avail. Liquidity (USD)", format="$%.0f")
