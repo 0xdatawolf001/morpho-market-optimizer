@@ -473,7 +473,10 @@ if not df_selected.empty:
             c1, c2, c3 = st.columns(3)
             c1.metric("Blended APY", f"{(total_yield/total_optimizable):.4%}")
             c2.metric("Annual Interest", f"${total_yield:,.2f}")
-            c3.metric("Total Wealth", f"${total_optimizable:,.2f}")
+            c2.metric("Monthly Interest", f"${total_yield/12:,.2f}")
+            c2.metric("Weekly Interest", f"${total_yield/52:,.2f}")
+            c2.metric("Daily Interest", f"${total_yield/365:,.2f}")
+            c3.metric("Total Wealth (1Y)", f"${total_optimizable:,.2f}")
 
             st.dataframe(
                 df_res.style.format({
