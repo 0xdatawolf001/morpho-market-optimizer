@@ -167,7 +167,14 @@ df_all = st.session_state.market_dict
 
 st.subheader("1. Market Discovery")
 st.caption("Use the filters below to narrow down markets, then copy Market IDs for optimization.")
-st.text("The tool assumes that you have selected a candidate list of markets. The tool assumes USD stables = 1 USD and only works for USD stables. Do not use for any other loan token. The tool also assumes that you have sensibly chosen the pools you are comfortable to invest in. You can use [Monarch Lend](https://monarchlend.xyz) to help you find markets as this should not be your primary market discovery tool")
+st.markdown(
+    "The tool assumes that you have selected a candidate list of markets. "
+    "The tool assumes USD stables = 1 USD and only works for USD stables. "
+    "Do not use for any other loan token. "
+    "The tool also assumes that you have sensibly chosen the pools you are comfortable to invest in. "
+    "You can use [Monarch Lend](https://monarchlend.xyz) to help you find markets as this should not be your primary market discovery tool"
+)
+
 
 # ==========================================
 # ADD MULTI-SELECT FILTERS HERE
