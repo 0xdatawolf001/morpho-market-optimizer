@@ -43,6 +43,16 @@ def compute_curve_multiplier(utilization: float) -> float:
         if utilization >= 1.0: return CURVE_STEEPNESS
         error_ratio = (utilization - TARGET_UTILIZATION) / (1 - TARGET_UTILIZATION)
         return (CURVE_STEEPNESS - 1) * error_ratio + 1
+    
+def extract_market_id_from_monarch_link(text: str) -> str:
+    """Extract market ID from Monarch link or return original text if not a link"""
+    text = text.strip()
+    if 'monarchlend.xyz/market/' in text:
+        # Extract the part after the last slash
+        parts = text.rstrip('/').split('/')
+        if len(parts) >= 2 and parts[-1].startswith('0x'):
+            return parts[-1].lower()
+    return text.lower()
 
 # ==========================================
 # 2. DATA FETCHING
@@ -299,16 +309,24 @@ col_scope, col_cash = st.columns([2, 1])
 
 with col_scope:
     st.subheader("2. Your Portfolio Scope")
-    # Increased height from 100 to 300 to fit ~10+ lines
     raw_ids = st.text_area(
-        "Paste Market IDs to optimize (one per line)", 
+        "Paste Market IDs or Monarch links to optimize (one per line)", 
         value="", 
         height=300,
-        placeholder="0xfea758e88403739fee1113b26623f43d3c37b51dc1e1e8231b78b23d1404e439\n0xf8c13c80ab8666c21fc5afa13105745cae7c1da13df596eb5054319f36655cc9",
-        help="💡 Copy Market IDs from the filtered table above. The optimizer will find the best allocation across these markets."
+        placeholder="0xfea758e88403739fee1113b26623f43d3c37b51dc1e1e8231b78b23d1404e439\nhttps://www.monarchlend.xyz/market/1/0x81b97c7305aca46c62f2ffce63a09c6a4d647163e25f31c44fadcbeab838b3f8",
+        help="💡 Copy Market IDs from the filtered table above OR paste Monarch links. The optimizer will find the best allocation across these markets."
     )
-    clean_ids = list(set([x.strip().lower() for x in raw_ids.replace(',', '\n').split('\n') if x.strip()]))
+    # Process each line to extract market IDs from links or use raw IDs
+    clean_ids = []
+    for line in raw_ids.replace(',', '\n').split('\n'):
+        line = line.strip()
+        if line:
+            extracted_id = extract_market_id_from_monarch_link(line)
+            if extracted_id and extracted_id not in clean_ids:
+                clean_ids.append(extracted_id)
+    
     df_selected = df_all[df_all['Market ID'].str.lower().isin(clean_ids)].copy()
+
 
 with col_cash:
     st.subheader("3. Budget")
