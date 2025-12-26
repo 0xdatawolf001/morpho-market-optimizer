@@ -469,14 +469,23 @@ if not df_selected.empty:
                     "Market ID": m['Market ID']
                 })
             
+            # --- LAYOUT ADJUSTMENT ---
             df_res = pd.DataFrame(results)
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Blended APY", f"{(total_yield/total_optimizable):.4%}")
-            c2.metric("Annual Interest", f"${total_yield:,.2f}")
-            c2.metric("Monthly Interest", f"${total_yield/12:,.2f}")
-            c2.metric("Weekly Interest", f"${total_yield/52:,.2f}")
-            c2.metric("Daily Interest", f"${total_yield/365:,.2f}")
-            c3.metric("Total Wealth (1Y)", f"${total_optimizable:,.2f}")
+
+            # Row 1: High-level Summary (2 columns)
+            r1_c1, r1_c2 = st.columns(2)
+            r1_c1.metric("Blended APY", f"{(total_yield/total_optimizable):.4%}")
+            r1_c2.metric("Total Wealth After 1 Year", f"${total_optimizable:,.2f}")
+
+            st.divider() # Optional: adds a visual line between summary and breakdown
+
+            # Row 2: Interest Breakdown (4 columns)
+            r2_c1, r2_c2, r2_c3, r2_c4 = st.columns(4)
+            r2_c1.metric("Annual Interest", f"${total_yield:,.2f}")
+            r2_c2.metric("Monthly Interest", f"${total_yield/12:,.2f}")
+            r2_c3.metric("Weekly Interest", f"${total_yield/52:,.2f}")
+            r2_c4.metric("Daily Interest", f"${total_yield/365:,.2f}")
+
 
             st.dataframe(
                 df_res.style.format({
