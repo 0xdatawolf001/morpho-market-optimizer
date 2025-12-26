@@ -236,15 +236,6 @@ st.markdown(
     "You can use [Monarch Lend](https://monarchlend.xyz) to help you find markets as this should not be your primary market discovery tool"
 )
 
-# --- PREPARE DATA ---
-# Ensure no NaNs and handle types
-df_all = st.session_state.market_dict.copy()
-df_all['Supply APY'] = pd.to_numeric(df_all['Supply APY'], errors='coerce').fillna(0.0)
-df_all['Utilization'] = pd.to_numeric(df_all['Utilization'], errors='coerce').fillna(0.0)
-df_all['Available Liquidity (USD)'] = pd.to_numeric(df_all['Available Liquidity (USD)'], errors='coerce').fillna(0.0)
-df_all['Total Supply (USD)'] = pd.to_numeric(df_all['Total Supply (USD)'], errors='coerce').fillna(0.0)
-df_all['Total Borrow (USD)'] = pd.to_numeric(df_all['Total Borrow (USD)'], errors='coerce').fillna(0.0)
-
 # Prepare Token Display names for the multi-selects
 def get_tokens(df, col):
     items = []
@@ -346,9 +337,9 @@ st.dataframe(
             format="%.2f%%",
             help="Current market utilization"
         ),
-        "Total Supply (USD)": st.column_config.NumberColumn("Total Supply (USD)", format="$%.0f"),
-        "Total Borrow (USD)": st.column_config.NumberColumn("Total Borrow (USD)", format="$%.0f"),
-        "Available Liquidity (USD)": st.column_config.NumberColumn("Avail. Liquidity (USD)", format="$%.0f")
+        "Total Supply (USD)": st.column_config.NumberColumn("Total Supply (USD)", format="dollar"),
+        "Total Borrow (USD)": st.column_config.NumberColumn("Total Borrow (USD)", format="dollar"),
+        "Available Liquidity (USD)": st.column_config.NumberColumn("Avail. Liquidity (USD)", format="dollar")
     }
 )
 
