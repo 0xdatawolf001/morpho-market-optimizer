@@ -195,9 +195,14 @@ class RebalanceOptimizer:
 
     def optimize(self):
         n = len(self.markets)
-        res = minimize(self.objective, [self.total_budget/n]*n, method='SLSQP', 
-                       bounds=[(0, self.total_budget)]*n, 
-                       constraints=({'type': 'eq', 'fun': lambda x: np.sum(x)-self.total_budget}))
+        res = minimize(
+            self.objective,
+            [self.total_budget/n]*n,
+            method="SLSQP",
+            bounds=[(0, self.total_budget)]*n,
+            constraints=({'type': 'eq', 'fun': lambda x: np.sum(x) - self.total_budget}),
+            options={"maxiter": 10000}   # <- set your cap here
+        )
         return res.x if res.success else None
 
 # ==========================================
