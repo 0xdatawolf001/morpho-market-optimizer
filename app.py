@@ -236,9 +236,6 @@ st.markdown(
     "You can use [Monarch Lend](https://monarchlend.xyz) to help you find markets as this should not be your primary market discovery tool"
 )
 
-st.subheader("1. Market Discovery")
-st.caption("Use the filters below to narrow down markets. Use [Monarch Lend](https://monarchlend.xyz) for primary discovery.")
-
 # --- PREPARE DATA ---
 # Ensure no NaNs and handle types
 df_all = st.session_state.market_dict.copy()
