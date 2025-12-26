@@ -64,8 +64,16 @@ def get_market_dictionary():
       markets(first: $first, skip: $skip) {
         items {
           uniqueKey
+          whitelisted
           loanAsset { symbol decimals chain { id } }
           collateralAsset { symbol }
+          state {
+            supplyApy
+            supplyAssets
+            borrowAssets
+            supplyAssetsUsd
+            borrowAssetsUsd
+          }
         }
       }
     }
@@ -75,7 +83,7 @@ def get_market_dictionary():
     load_status = st.empty()
     
     while True:
-        load_status.info(f"⏳ Indexing Morpho Markets... {len(all_items)} found.")
+        load_status.info(f"⏳ Indexing Morpho Markets... {len(all_items)} of 3000+ markets found.")
         resp = requests.post(MORPHO_API_URL, json={'query': query, 'variables': {"first": BATCH_SIZE, "skip": skip}})
         data = resp.json()['data']['markets']['items']
         if not data: break
@@ -88,15 +96,46 @@ def get_market_dictionary():
     processed = []
     for m in all_items:
         loan = m.get('loanAsset') or {}
+        state = m.get('state') or {}
+        
+        # Safe float conversion with None handling
+        def safe_float(value, default=0.0):
+            """Convert value to float, handling None and invalid values"""
+            if value is None:
+                return default
+            try:
+                return float(value)
+            except (ValueError, TypeError):
+                return default
+        
+        # Get TVL values with safe conversion
+        supply_usd = safe_float(state.get('supplyAssetsUsd'))
+        borrow_usd = safe_float(state.get('borrowAssetsUsd'))
+        available_liquidity = supply_usd - borrow_usd
+        
+        # Calculate utilization
+        supply_assets = safe_float(state.get('supplyAssets'))
+        borrow_assets = safe_float(state.get('borrowAssets'))
+        utilization = (borrow_assets / supply_assets * 100) if supply_assets > 0 else 0
+        
         processed.append({
             "Market ID": m['uniqueKey'],
             "Chain": CHAIN_ID_TO_NAME.get(loan.get('chain', {}).get('id'), "Other"),
             "Loan Token": loan.get('symbol'),
             "Collateral": (m.get('collateralAsset') or {}).get('symbol'),
             "Decimals": loan.get('decimals'),
-            "ChainID": loan.get('chain', {}).get('id')
+            "ChainID": loan.get('chain', {}).get('id'),
+            "Supply APY": safe_float(state.get('supplyApy')),
+            "Utilization": utilization,
+            "Total Supply (USD)": supply_usd,
+            "Total Borrow (USD)": borrow_usd,
+            "Available Liquidity (USD)": available_liquidity,
+            "Whitelisted": m.get('whitelisted', False)
         })
     return pd.DataFrame(processed)
+
+
+
 
 def fetch_live_market_details(selected_df):
     details = []
@@ -174,6 +213,13 @@ if "market_dict" not in st.session_state:
     st.session_state.market_dict = get_market_dictionary()
 
 df_all = st.session_state.market_dict
+# --- ADD THIS AFTER df_all = st.session_state.market_dict ---
+df_all = st.session_state.market_dict.copy()
+df_all['Supply APY'] = pd.to_numeric(df_all['Supply APY'], errors='coerce').fillna(0.0)
+df_all['Utilization'] = pd.to_numeric(df_all['Utilization'], errors='coerce').fillna(0.0)
+df_all['Available Liquidity (USD)'] = pd.to_numeric(df_all['Available Liquidity (USD)'], errors='coerce').fillna(0.0)
+df_all['Total Supply (USD)'] = pd.to_numeric(df_all['Total Supply (USD)'], errors='coerce').fillna(0.0)
+df_all['Total Borrow (USD)'] = pd.to_numeric(df_all['Total Borrow (USD)'], errors='coerce').fillna(0.0)
 
 st.subheader("1. Market Discovery")
 st.caption("Use the filters below to narrow down markets, then copy Market IDs for optimization.")
@@ -185,122 +231,110 @@ st.markdown(
     "You can use [Monarch Lend](https://monarchlend.xyz) to help you find markets as this should not be your primary market discovery tool"
 )
 
+st.subheader("1. Market Discovery")
+st.caption("Use the filters below to narrow down markets. Use [Monarch Lend](https://monarchlend.xyz) for primary discovery.")
 
-# ==========================================
-# ADD MULTI-SELECT FILTERS HERE
-# ==========================================
+# --- PREPARE DATA ---
+# Ensure no NaNs and handle types
+df_all = st.session_state.market_dict.copy()
+df_all['Supply APY'] = pd.to_numeric(df_all['Supply APY'], errors='coerce').fillna(0.0)
+df_all['Utilization'] = pd.to_numeric(df_all['Utilization'], errors='coerce').fillna(0.0)
+df_all['Available Liquidity (USD)'] = pd.to_numeric(df_all['Available Liquidity (USD)'], errors='coerce').fillna(0.0)
+df_all['Total Supply (USD)'] = pd.to_numeric(df_all['Total Supply (USD)'], errors='coerce').fillna(0.0)
+df_all['Total Borrow (USD)'] = pd.to_numeric(df_all['Total Borrow (USD)'], errors='coerce').fillna(0.0)
 
-# Prepare token display names with truncated addresses
-def create_token_display(df, token_col, address_col='Market ID'):
-    """Create display names with truncated addresses for duplicate token names"""
-    token_data = []
-    for _, row in df.iterrows():
-        token_name = row[token_col]
-        market_id = row[address_col]
-        # Truncate address to first 6 chars (0x + 4 chars)
-        truncated = market_id[:6] if pd.notna(market_id) else ""
-        
-        # Handle null/blank token names
-        if pd.isna(token_name) or str(token_name).strip() == "":
-            display_name = f"({truncated})"
-            sort_key = f"zzz_{truncated}"  # Sort unnamed tokens last
-        else:
-            display_name = f"{token_name} ({truncated})"
-            sort_key = token_name.lower()
-        
-        token_data.append({
-            'display_name': display_name,
-            'token_name': token_name,
-            'market_id': market_id,
-            'sort_key': sort_key
-        })
-    return token_data
+# Prepare Token Display names for the multi-selects
+def get_tokens(df, col):
+    items = []
+    for _, r in df.iterrows():
+        name = str(r[col])
+        mid = str(r['Market ID'])[:6]
+        disp = f"{name} ({mid})" if name and name != "nan" else f"({mid})"
+        items.append({'disp': disp, 'id': r['Market ID']})
+    return items
 
-# Create lookup dictionaries for loan and collateral tokens
-loan_token_data = create_token_display(df_all, 'Loan Token')
-collateral_token_data = create_token_display(df_all, 'Collateral')
+loan_tokens = get_tokens(df_all, 'Loan Token')
+collateral_tokens = get_tokens(df_all, 'Collateral')
 
-# Get unique display names (sorted)
-unique_loan_displays = sorted(list(set([x['display_name'] for x in loan_token_data])), 
-                               key=lambda x: next(d['sort_key'] for d in loan_token_data if d['display_name'] == x))
-unique_collateral_displays = sorted(list(set([x['display_name'] for x in collateral_token_data])), 
-                                     key=lambda x: next(d['sort_key'] for d in collateral_token_data if d['display_name'] == x))
+unique_loan_disp = sorted(list(set(x['disp'] for x in loan_tokens)))
+unique_coll_disp = sorted(list(set(x['disp'] for x in collateral_tokens)))
 unique_chains = sorted(df_all['Chain'].dropna().unique().tolist())
 
-# Display filters in three columns
-filter_col1, filter_col2, filter_col3 = st.columns(3)
+# --- FILTER FORM ---
+with st.form("market_filter_form"):
+    f_col1, f_col2, f_col3 = st.columns(3)
+    with f_col1:
+        sel_chains = st.multiselect("Chains", options=unique_chains)
+    with f_col2:
+        sel_loans = st.multiselect("Loan Tokens", options=unique_loan_disp)
+    with f_col3:
+        sel_colls = st.multiselect("Collateral Tokens", options=unique_coll_disp)
 
-with filter_col1:
-    selected_chains = st.multiselect(
-        "Filter by Chain",
-        options=unique_chains,
-        default=[],
-        placeholder="Select chains..."
-    )
+    show_whitelisted = st.checkbox("Whitelisted?", value=False)
 
-with filter_col2:
-    selected_loan_tokens = st.multiselect(
-        "Filter by Loan Token",
-        options=unique_loan_displays,
-        default=[],
-        placeholder="Select loan tokens..."
-    )
+    st.markdown("---")
+    r1_c1, r1_c2 = st.columns(2)
+    with r1_c1:
+        st.write("**Supply APY %**")
+        sc1, sc2 = st.columns(2)
+        m_apy_in = sc1.number_input("Min %", 0.0, 200.0, 0.0, step=1.0, key="m_apy_in")
+        x_apy_in = sc2.number_input("Max %", 0.0, 200.0, 200.0, step=1.0, key="x_apy_in")
+    
+    with r1_c2:
+        st.write("**Utilization %**")
+        uc1, uc2 = st.columns(2)
+        m_util_in = uc1.number_input("Min %", 0.0, 100.0, 0.0, step=5.0, key="m_util_in")
+        x_util_in = uc2.number_input("Max %", 0.0, 100.0, 100.0, step=5.0, key="x_util_in")
 
-with filter_col3:
-    selected_collateral_tokens = st.multiselect(
-        "Filter by Collateral Token",
-        options=unique_collateral_displays,
-        default=[],
-        placeholder="Select collateral tokens..."
-    )
+    st.write("**Liquidity & Supply (USD)**")
+    r2_c1, r2_c2 = st.columns(2)
+    m_liq_in = r2_c1.number_input("Min Liquidity (USD)", 0.0, 1e15, 0.0, step=10000.0)
+    m_sup_in = r2_c2.number_input("Min Total Supply (USD)", 0.0, 1e15, 0.0, step=10000.0)
 
-# Apply filters to dataframe
+    apply_btn = st.form_submit_button("Apply Filters", type="primary", use_container_width=True)
+
+# --- FILTER APPLICATION ---
 df_filtered = df_all.copy()
+if sel_chains:
+    df_filtered = df_filtered[df_filtered['Chain'].isin(sel_chains)]
+if sel_loans:
+    target_ids = [x['id'] for x in loan_tokens if x['disp'] in sel_loans]
+    df_filtered = df_filtered[df_filtered['Market ID'].isin(target_ids)]
+if sel_colls:
+    target_ids = [x['id'] for x in collateral_tokens if x['disp'] in sel_colls]
+    df_filtered = df_filtered[df_filtered['Market ID'].isin(target_ids)]
+if show_whitelisted:
+    df_filtered = df_filtered[df_filtered['Whitelisted'] == True]
 
-# Filter by chain
-if selected_chains:
-    df_filtered = df_filtered[df_filtered['Chain'].isin(selected_chains)]
+df_filtered = df_filtered[
+    (df_filtered['Supply APY'] >= (m_apy_in / 100.0)) & 
+    (df_filtered['Supply APY'] <= (x_apy_in / 100.0)) &
+    (df_filtered['Utilization'] >= m_util_in) & 
+    (df_filtered['Utilization'] <= x_util_in) &
+    (df_filtered['Available Liquidity (USD)'] >= m_liq_in) &
+    (df_filtered['Total Supply (USD)'] >= m_sup_in)
+]
 
-# Filter by loan token (match against display names)
-if selected_loan_tokens:
-    # Extract market IDs from selected display names
-    selected_loan_market_ids = [d['market_id'] for d in loan_token_data 
-                                if d['display_name'] in selected_loan_tokens]
-    df_filtered = df_filtered[df_filtered['Market ID'].isin(selected_loan_market_ids)]
-
-# Filter by collateral token (match against display names)
-if selected_collateral_tokens:
-    # Extract market IDs from selected display names
-    selected_collateral_market_ids = [d['market_id'] for d in collateral_token_data 
-                                      if d['display_name'] in selected_collateral_tokens]
-    df_filtered = df_filtered[df_filtered['Market ID'].isin(selected_collateral_market_ids)]
-
-# Display filtered results count
-st.caption(f"📊 Showing {len(df_filtered)} of {len(df_all)} markets")
-
-# Display the filtered dataframe
+# --- RESULTS DISPLAY ---
 st.dataframe(
     df_filtered,
     use_container_width=True,
     hide_index=True,
-    column_order=["Chain", "Loan Token", "Collateral", "Market ID"],
+    column_order=[
+        "Whitelisted", "Chain", "Loan Token", "Collateral", 
+        "Supply APY", "Utilization", 
+        "Total Supply (USD)", "Total Borrow (USD)", "Available Liquidity (USD)",
+        "Market ID"
+    ],
     column_config={
-        "Market ID": st.column_config.TextColumn(
-            "Market ID",
-            width="large",
-            help="Click to copy"
-        ),
-        "Chain": st.column_config.TextColumn(
-            "Chain",
-            width="small"
-        )
+        "Whitelisted": st.column_config.CheckboxColumn("Whitelisted?"),
+        "Supply APY": st.column_config.NumberColumn("Supply APY", format="%.4f%%"),
+        "Utilization": st.column_config.NumberColumn("Utilization", format="%.2f%%"),
+        "Total Supply (USD)": st.column_config.NumberColumn("Total Supply (USD)", format="$%.0f"),
+        "Total Borrow (USD)": st.column_config.NumberColumn("Total Borrow (USD)", format="$%.0f"),
+        "Available Liquidity (USD)": st.column_config.NumberColumn("Avail. Liquidity (USD)", format="$%.0f")
     }
 )
-
-
-# ==========================================
-# END OF FILTER SECTION
-# ==========================================
 
 st.divider()
 
@@ -435,3 +469,7 @@ if not df_selected.empty:
             )
 else:
     st.warning("Add Market IDs to section 2 to begin rebalancing.")
+
+
+
+
