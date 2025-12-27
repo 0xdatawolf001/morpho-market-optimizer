@@ -354,7 +354,7 @@ with col_scope:
         "Paste Market IDs or Monarch links to optimize (one per line)", 
         value="", 
         height=300,
-        placeholder="0xfea758e88403739fee1113b26623f43d3c37b51dc1e1e8231b78b23d1404e439\nhttps://www.monarchlend.xyz/market/1/0x81b97c7305aca46c62f2ffce63a09c6a4d647163e25f31c44fadcbeab838b3f8",
+        placeholder="Market IDs\n0x347aa5f94a12dd46d3e17e542ca1c4033bd6952bde4b22af3caa33c82e52451a\n0x81b97c7305aca46c62f2ffce63a09c6a4d647163e25f31c44fadcbeab838b3f8\n\n- Monarch Links\nhttps://www.monarchlend.xyz/market/1/0x5ffdf15c5a4d7c6affb3f12634eeda1a20e60b92c0eb547f61754f656b55841e\nhttps://www.monarchlend.xyz/market/1/0xc7d717f4052ac4e5463dcc58cea0f6b05dd7d8c67e0aee68ebe30a8af09b259f\nhttps://www.monarchlend.xyz/market/1/0x0655e0c8686d94d9e0c0d2b78d7f99492676e52d712db5ac061b3c78da4b7587\nhttps://www.monarchlend.xyz/market/1/0x3f1d5c88c72432b04f2074499fe217468af49ddaa98bcb6ec80b08f76a82c6ec",
         help="💡 Copy Market IDs from the filtered table above OR paste Monarch links. The optimizer will find the best allocation across these markets."
     )
     # Process each line to extract market IDs from links or use raw IDs
