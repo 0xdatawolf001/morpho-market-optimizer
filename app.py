@@ -83,7 +83,7 @@ def get_market_dictionary():
     load_status = st.empty()
     
     while True:
-        load_status.info(f"⏳ Indexing Morpho Markets... {len(all_items)} of 3000+ markets found.")
+        load_status.info(f"⏳ Retrieving Morpho Markets... {len(all_items)} of 3000+ markets found. Please wait...")
         resp = requests.post(MORPHO_API_URL, json={'query': query, 'variables': {"first": BATCH_SIZE, "skip": skip}})
         data = resp.json()['data']['markets']['items']
         if not data: break
@@ -465,8 +465,8 @@ if not df_selected.empty:
                 results.append({
                     "Market": f"{m['Loan Token']} / {m['Collateral']}",
                     "Chain": m['Chain'], 
-                    "Action": action,
-                    "Weight": weight_pct, # <--- NEW COLUMN
+                    "Suggested Action": action,
+                    "Portfolio Weight": weight_pct,
                     "Current ($)": m['existing_balance_usd'],
                     "Target ($)": target_alloc,
                     "Net Move ($)": net_move,
@@ -504,7 +504,7 @@ if not df_selected.empty:
             
             st.dataframe(
                 df_res.style.format({
-                    "Weight": "{:.2%}", # <--- Formatting for Weight
+                    "Portfolio Weight": "{:.2%}",
                     "Current ($)": "${:,.2f}", 
                     "Target ($)": "${:,.2f}", 
                     "Net Move ($)": "${:,.2f}",
@@ -514,7 +514,7 @@ if not df_selected.empty:
                 use_container_width=True, 
                 hide_index=True,
                 column_order=[
-                    "Market", "Chain", "Action", "Weight", 
+                    "Market", "Chain", "Suggested Action", "Portfolio Weight", 
                     "Current ($)", "Target ($)", "Net Move ($)", 
                     "Current APY", "New APY"
                 ]
