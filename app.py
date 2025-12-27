@@ -485,20 +485,23 @@ if not df_selected.empty:
             st.subheader("Results")
             
             # Row 1: APY Comparisons
-            m1, m2, m3, m4 = st.columns(4)
+            m1, m2, m3, m4, m5 = st.columns(5)
             m1.metric("Current Blended APY", f"{current_blended_apy:.4%}")
             m2.metric("New Optimized APY", f"{new_blended_apy:.4%}", delta=f"{apy_diff*100:.3f}%")
-            m3.metric("Annual Interest Diff", f"+${interest_diff:,.2f}" if interest_diff > 0 else f"-${abs(interest_diff):,.2f}")
+            m3.metric("Current Total Wealth", f"${total_optimizable:,.2f}")
             m4.metric("Total Wealth (1 Yr)", f"${total_optimizable+new_annual_interest:,.2f}")
+            m5.metric("Annual Interest Diff", f"+${interest_diff:,.2f}" if interest_diff > 0 else f"-${abs(interest_diff):,.2f}")
 
             st.divider()
 
             # Row 2: Absolute Interest Breakdown
-            r2_c1, r2_c2, r2_c3, r2_c4 = st.columns(4)
+            r2_c1, r2_c2, r2_c3, r2_c4, r2_c5 = st.columns(5)
             r2_c1.metric("Annual Interest", f"${new_annual_interest:,.2f}")
             r2_c2.metric("Monthly Interest", f"${new_annual_interest/12:,.2f}")
             r2_c3.metric("Weekly Interest", f"${new_annual_interest/52:,.2f}")
             r2_c4.metric("Daily Interest", f"${new_annual_interest/365:,.2f}")
+            r2_c5.metric("Hourly Interest", f"${new_annual_interest/8760:,.4f}")
+            
 
             df_res = pd.DataFrame(results)
 
