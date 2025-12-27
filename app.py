@@ -518,7 +518,7 @@ if not df_selected.empty:
                 )
                 m3.metric("Current Deployed Capital", f"${current_wealth:,.2f}")
                 m4.metric("Total Optimized Wealth (1 Yr)", f"${total_optimizable+new_annual_interest:,.2f}")
-                m5.metric("Annual Interest Gain", f"+${interest_diff:,.2f}")
+                m5.metric("Additional Interest Gain From Optimization", f"+${interest_diff:,.2f}")
             else:
                 # New portfolio - no "current" metrics
                 m1, m2, m3 = st.columns(3)
