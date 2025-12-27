@@ -434,26 +434,39 @@ if not df_selected.empty:
         for m in market_data_list:
             m['existing_balance_usd'] = st.session_state.balance_cache.get(m['Market ID'], 0.0)
 
+        # 1. Calculate Pre-Optimization Metrics
+        # We assume uninvested 'new_cash' currently earns 0%
+        current_annual_interest = sum(m['existing_balance_usd'] * m['current_supply_apy'] for m in market_data_list)
+        current_blended_apy = current_annual_interest / total_optimizable if total_optimizable > 0 else 0.0
+
+        # 2. Run Optimizer
         opt = RebalanceOptimizer(total_optimizable, market_data_list)
         allocations = opt.optimize()
 
         if allocations is not None:
             st.divider()
             results = []
-            total_yield = 0
+            new_annual_interest = 0
+            
             for i, target_alloc in enumerate(allocations):
                 m = market_data_list[i]
                 new_apy = opt.simulate_apy(m, target_alloc)
                 net_move = target_alloc - m['existing_balance_usd']
-                total_yield += (target_alloc * new_apy)
+                
+                # Accumulate new yield
+                new_annual_interest += (target_alloc * new_apy)
                 
                 # EMOJI ONLY ACTION
                 action = "🟢 DEPOSIT" if net_move > 0.01 else ("🔴 WITHDRAW" if net_move < -0.01 else "⚪ HOLD")
                 
+                # Calculate Weight
+                weight_pct = target_alloc / total_optimizable if total_optimizable > 0 else 0.0
+
                 results.append({
                     "Market": f"{m['Loan Token']} / {m['Collateral']}",
                     "Chain": m['Chain'], 
                     "Action": action,
+                    "Weight": weight_pct, # <--- NEW COLUMN
                     "Current ($)": m['existing_balance_usd'],
                     "Target ($)": target_alloc,
                     "Net Move ($)": net_move,
@@ -462,32 +475,50 @@ if not df_selected.empty:
                     "Market ID": m['Market ID']
                 })
             
-            # --- LAYOUT ADJUSTMENT ---
-            df_res = pd.DataFrame(results)
+            # 3. Calculate Aggregates
+            new_blended_apy = new_annual_interest / total_optimizable if total_optimizable > 0 else 0.0
+            apy_diff = new_blended_apy - current_blended_apy
+            interest_diff = new_annual_interest - current_annual_interest
 
-            # Row 1: High-level Summary (2 columns)
-            r1_c1, r1_c2 = st.columns(2)
-            r1_c1.metric("Blended APY", f"{(total_yield/total_optimizable):.4%}")
-            r1_c2.metric("Total Wealth (After 1 Year)", f"${total_optimizable+total_yield:,.2f}")
+            # --- METRICS DISPLAY ---
+            st.subheader("Results")
+            
+            # Row 1: APY Comparisons
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Current Blended APY", f"{current_blended_apy:.4%}")
+            m2.metric("New Optimized APY", f"{new_blended_apy:.4%}", delta=f"{apy_diff*100:.3f}%")
+            m3.metric("Annual Interest Diff", f"+${interest_diff:,.2f}" if interest_diff > 0 else f"-${abs(interest_diff):,.2f}")
+            m4.metric("Total Wealth (1 Yr)", f"${total_optimizable+new_annual_interest:,.2f}")
 
-            st.divider() # Optional: adds a visual line between summary and breakdown
+            st.divider()
 
-            # Row 2: Interest Breakdown (4 columns)
+            # Row 2: Absolute Interest Breakdown
             r2_c1, r2_c2, r2_c3, r2_c4 = st.columns(4)
-            r2_c1.metric("Annual Interest", f"${total_yield:,.2f}")
-            r2_c2.metric("Monthly Interest", f"${total_yield/12:,.2f}")
-            r2_c3.metric("Weekly Interest", f"${total_yield/52:,.2f}")
-            r2_c4.metric("Daily Interest", f"${total_yield/365:,.2f}")
+            r2_c1.metric("Annual Interest", f"${new_annual_interest:,.2f}")
+            r2_c2.metric("Monthly Interest", f"${new_annual_interest/12:,.2f}")
+            r2_c3.metric("Weekly Interest", f"${new_annual_interest/52:,.2f}")
+            r2_c4.metric("Daily Interest", f"${new_annual_interest/365:,.2f}")
 
-
+            # --- DATAFRAME DISPLAY ---
+            df_res = pd.DataFrame(results)
+            
             st.dataframe(
                 df_res.style.format({
-                    "Current ($)": "${:,.2f}", "Target ($)": "${:,.2f}", "Net Move ($)": "${:,.2f}",
-                    "Current APY": "{:.4%}", "New APY": "{:.4%}"
-                }), use_container_width=True, hide_index=True
+                    "Weight": "{:.2%}", # <--- Formatting for Weight
+                    "Current ($)": "${:,.2f}", 
+                    "Target ($)": "${:,.2f}", 
+                    "Net Move ($)": "${:,.2f}",
+                    "Current APY": "{:.4%}", 
+                    "New APY": "{:.4%}"
+                }), 
+                use_container_width=True, 
+                hide_index=True,
+                column_order=[
+                    "Market", "Chain", "Action", "Weight", 
+                    "Current ($)", "Target ($)", "Net Move ($)", 
+                    "Current APY", "New APY"
+                ]
             )
-else:
-    st.warning("Add Market IDs to section 2 to begin rebalancing.")
 
 
 
