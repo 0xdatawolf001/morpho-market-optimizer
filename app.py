@@ -434,10 +434,10 @@ if not df_selected.empty:
         for m in market_data_list:
             m['existing_balance_usd'] = st.session_state.balance_cache.get(m['Market ID'], 0.0)
 
-        # 1. Calculate Pre-Optimization Metrics
-        # We assume uninvested 'new_cash' currently earns 0%
+        # 1. Calculate Pre-Optimization Metrics (FIXED)
+        # Current blended APY should ONLY consider existing deployed capital
         current_annual_interest = sum(m['existing_balance_usd'] * m['current_supply_apy'] for m in market_data_list)
-        current_blended_apy = current_annual_interest / total_optimizable if total_optimizable > 0 else 0.0
+        current_blended_apy = current_annual_interest / current_wealth if current_wealth > 0 else 0.0
 
         # 2. Run Optimizer
         opt = RebalanceOptimizer(total_optimizable, market_data_list)
@@ -453,13 +453,9 @@ if not df_selected.empty:
                 new_apy = opt.simulate_apy(m, target_alloc)
                 net_move = target_alloc - m['existing_balance_usd']
                 
-                # Accumulate new yield
                 new_annual_interest += (target_alloc * new_apy)
                 
-                # EMOJI ONLY ACTION
                 action = "🟢 DEPOSIT" if net_move > 0.01 else ("🔴 WITHDRAW" if net_move < -0.01 else "⚪ HOLD")
-                
-                # Calculate Weight
                 weight_pct = target_alloc / total_optimizable if total_optimizable > 0 else 0.0
 
                 results.append({
@@ -476,25 +472,47 @@ if not df_selected.empty:
                     "Market ID": m['Market ID']
                 })
             
-            # 3. Calculate Aggregates
+            # 3. Calculate Post-Optimization Metrics
             new_blended_apy = new_annual_interest / total_optimizable if total_optimizable > 0 else 0.0
-            apy_diff = new_blended_apy - current_blended_apy
-            interest_diff = new_annual_interest - current_annual_interest
+            
+            # Calculate APY improvement correctly
+            if current_wealth > 0:
+                apy_diff = new_blended_apy - current_blended_apy
+                interest_diff = new_annual_interest - current_annual_interest
+            else:
+                apy_diff = new_blended_apy  # All new deployment
+                interest_diff = new_annual_interest
 
             # --- METRICS DISPLAY ---
             st.subheader("Results")
             
-            # Row 1: APY Comparisons
-            m1, m2, m3, m4, m5 = st.columns(5)
-            m1.metric("Current Blended APY", f"{current_blended_apy:.4%}")
-            m2.metric("New Optimized APY", f"{new_blended_apy:.4%}", delta=f"{apy_diff*100:.3f}%")
-            m3.metric("Current Total Wealth", f"${total_optimizable:,.2f}")
-            m4.metric("Total Wealth (1 Yr)", f"${total_optimizable+new_annual_interest:,.2f}")
-            m5.metric("Annual Interest Diff", f"+${interest_diff:,.2f}" if interest_diff > 0 else f"-${abs(interest_diff):,.2f}")
+            # Show current vs optimized
+            if current_wealth > 0:
+                m1, m2, m3, m4, m5 = st.columns(5)
+                m1.metric(
+                    "Current Deployed APY", 
+                    f"{current_blended_apy:.4%}",
+                    help="Weighted APY of existing balances only"
+                )
+                m2.metric(
+                    "Optimized Blended APY", 
+                    f"{new_blended_apy:.4%}", 
+                    delta=f"{apy_diff*100:.3f}%",
+                    help="Projected APY after deploying all capital"
+                )
+                m3.metric("Current Deployed Capital", f"${current_wealth:,.2f}")
+                m4.metric("Total Optimized Wealth (1 Yr)", f"${total_optimizable+new_annual_interest:,.2f}")
+                m5.metric("Annual Interest Gain", f"+${interest_diff:,.2f}")
+            else:
+                # New portfolio - no "current" metrics
+                m1, m2, m3 = st.columns(3)
+                m1.metric("Optimized Blended APY", f"{new_blended_apy:.4%}")
+                m2.metric("Total Capital Deployed", f"${total_optimizable:,.2f}")
+                m3.metric("Annual Interest", f"${new_annual_interest:,.2f}")
 
             st.divider()
 
-            # Row 2: Absolute Interest Breakdown
+            # Row 2: Absolute Interest Breakdown (unchanged)
             r2_c1, r2_c2, r2_c3, r2_c4, r2_c5 = st.columns(5)
             r2_c1.metric("Annual Interest", f"${new_annual_interest:,.2f}")
             r2_c2.metric("Monthly Interest", f"${new_annual_interest/12:,.2f}")
@@ -502,7 +520,6 @@ if not df_selected.empty:
             r2_c4.metric("Daily Interest", f"${new_annual_interest/365:,.2f}")
             r2_c5.metric("Hourly Interest", f"${new_annual_interest/8760:,.4f}")
             
-
             df_res = pd.DataFrame(results)
 
             # Sort by Suggested Action first, then Portfolio Weight descending
