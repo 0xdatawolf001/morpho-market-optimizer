@@ -176,16 +176,32 @@ class RebalanceOptimizer:
         self.markets = market_list
 
     def simulate_apy(self, market, user_new_alloc_usd):
-        user_existing_wei = market['existing_balance_usd'] * (10**market['Decimals'])
-        other_users_supply_wei = max(0, market['raw_supply'] - user_existing_wei)
-        simulated_total_supply_wei = other_users_supply_wei + (user_new_alloc_usd * (10**market['Decimals']))
+        # Short-circuit for no meaningful change (compare USD before Wei conversion)
+        change_threshold = 0.000000000000001
+        if abs(user_new_alloc_usd - market['existing_balance_usd']) < change_threshold:
+            return market['current_supply_apy']
         
-        if simulated_total_supply_wei <= 0: return 0.0
+        # Calculate user's existing and new allocation in Wei
+        user_existing_wei = market['existing_balance_usd'] * (10**market['Decimals'])
+        user_new_wei = user_new_alloc_usd * (10**market['Decimals'])
+        
+        # Calculate other users' supply (exclude current user's existing allocation)
+        other_users_supply_wei = max(0, market['raw_supply'] - user_existing_wei)
+        
+        # Simulated total supply with user's new allocation
+        simulated_total_supply_wei = other_users_supply_wei + user_new_wei
+        
+        if simulated_total_supply_wei <= 0: 
+            return 0.0
+        
+        # Calculate utilization rate and APY
         new_util = market['raw_borrow'] / simulated_total_supply_wei
         new_mult = compute_curve_multiplier(new_util)
         new_borrow_rate = market['rate_at_target'] * new_mult
         new_supply_rate = new_borrow_rate * new_util * (1 - market['fee'])
+        
         return rate_per_second_to_apy(new_supply_rate)
+
 
     def objective(self, x):
         total_yield = 0
@@ -546,8 +562,3 @@ if not df_selected.empty:
                     "Current APY", "New APY", "Annual $ Yield Contribution"
                 ]
             )
-
-
-
-
-
