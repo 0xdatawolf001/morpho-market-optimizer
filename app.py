@@ -472,6 +472,7 @@ if not df_selected.empty:
                     "Net Move ($)": net_move,
                     "Current APY": m['current_supply_apy'],
                     "New APY": new_apy,
+                    "Annual $ Yield Contribution": target_alloc * new_apy,
                     "Market ID": m['Market ID']
                 })
             
@@ -499,26 +500,33 @@ if not df_selected.empty:
             r2_c3.metric("Weekly Interest", f"${new_annual_interest/52:,.2f}")
             r2_c4.metric("Daily Interest", f"${new_annual_interest/365:,.2f}")
 
-            # --- DATAFRAME DISPLAY ---
             df_res = pd.DataFrame(results)
-            
+
+            # Sort by Suggested Action first, then Portfolio Weight descending
+            df_res_sorted = df_res.sort_values(
+                by=["Suggested Action", "Portfolio Weight"], 
+                ascending=[False, False]  # True for Suggested Action, False for Portfolio Weight
+            )
+
             st.dataframe(
-                df_res.style.format({
+                df_res_sorted.style.format({
                     "Portfolio Weight": "{:.2%}",
                     "Current ($)": "${:,.2f}", 
                     "Target ($)": "${:,.2f}", 
                     "Net Move ($)": "${:,.2f}",
                     "Current APY": "{:.4%}", 
-                    "New APY": "{:.4%}"
+                    "New APY": "{:.4%}",
+                    "Annual $ Yield Contribution": "${:,.2f}",
                 }), 
                 use_container_width=True, 
                 hide_index=True,
                 column_order=[
                     "Market", "Chain", "Suggested Action", "Portfolio Weight", 
                     "Current ($)", "Target ($)", "Net Move ($)", 
-                    "Current APY", "New APY"
+                    "Current APY", "New APY", "Annual $ Yield Contribution"
                 ]
             )
+
 
 
 
