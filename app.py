@@ -83,7 +83,7 @@ def get_market_dictionary():
     load_status = st.empty()
     
     while True:
-        load_status.info(f"⏳ Retrieving Morpho Markets... {len(all_items)} of 3000+ markets found. Please wait...")
+        load_status.info(f"⏳ Retrieving Morpho Markets... {len(all_items)} of 3000+ markets found. Please wait as we are downloading 1000 market at a time...")
         resp = requests.post(MORPHO_API_URL, json={'query': query, 'variables': {"first": BATCH_SIZE, "skip": skip}})
         data = resp.json()['data']['markets']['items']
         if not data: break
