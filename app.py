@@ -458,7 +458,7 @@ if not df_selected.empty:
             st.caption("Prioritizes raw APY above all else. May result in high concentration in a single market.")
         with col_info2:
             st.markdown("**🟣 Tangency**")
-            st.caption("Maximizes Excess Return per unit of Concentration Risk. Uses your 'Hurdle Rate' as the risk-free benchmark.")
+            st.caption("Maximizes Excess Return per unit of Concentration Risk. Uses your 'Hurdle Rate' (like AAVE's rate, ETH staking rate, a rate you are benchmarking against) or risk-free benchmark. This is the same as a Frontier Portfolio but adjusted with a required rate of return")
         with col_info3:
             st.markdown("**🌸 Frontier (Diversified)**")
             st.caption("Balances Yield and Diversity (HHI). Seeks the highest yield possible while maintaining a distributed allocation.")
