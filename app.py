@@ -704,9 +704,14 @@ if not df_selected.empty:
         
         # Add Yield Contribution Column
         total_gen_yield = df_res["Annual $ Yield"].sum()
-        df_res["Yield Contribution"] = df_res["Annual $ Yield"].apply(
-            lambda x: x / total_gen_yield if total_gen_yield > 0 else 0
-        )
+        df_res = pd.DataFrame(results)
+        
+        # Add Yield Contribution Column
+        # Calculated as: Portfolio Weight * New APY
+        if total_optimizable > 0:
+            df_res["Yield Contribution"] = (df_res["Target ($)"] / total_optimizable) * df_res["New APY"]
+        else:
+            df_res["Yield Contribution"] = 0.0
         
         current_blended = res_data['current_metrics']['blended_apy']
         current_ann = res_data['current_metrics']['annual_interest']
@@ -772,7 +777,7 @@ if not df_selected.empty:
                 "Current APY": "{:.4%}", 
                 "New APY": "{:.4%}", 
                 "Annual $ Yield": "${:,.2f}", 
-                "Yield Contribution": "{:.2%}"
+                "Yield Contribution": "{:.4%}"
             }), 
             width='stretch', 
             hide_index=True,
