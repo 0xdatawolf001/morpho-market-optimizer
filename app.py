@@ -667,22 +667,44 @@ if not df_selected.empty:
         current_ann = res_data['current_metrics']['annual_interest']
         new_blended_apy = new_annual_interest / total_optimizable if total_optimizable > 0 else 0.0
         
-        # Financial Summary for selected strategy
-        res_m1, res_m2, res_m3 = st.columns(3)
-        res_m1.metric("Current APY", f"{current_blended:.4%}")
-        res_m2.metric("Optimized APY", f"{new_blended_apy:.4%}", delta=f"{(new_blended_apy-current_blended)*100:.3f}%")
-        res_m3.metric("Total Annual Interest", f"${new_annual_interest:,.2f}", delta=f"${new_annual_interest-current_ann:,.2f}")
+        # 1. Financial Summary Metrics
+        st.subheader("Optimization Summary")
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Current APY", f"{current_blended:.4%}")
+        m2.metric("Optimized APY", f"{new_blended_apy:.4%}", delta=f"{(new_blended_apy-current_blended)*100:.3f}%")
+        m3.metric("Total Annual Interest", f"${new_annual_interest:,.2f}", delta=f"${new_annual_interest-current_ann:,.2f}")
 
-        # Sorting: Action (Descending: 🟢 > 🔴 > ⚪) then Target ($) Descending
-        df_res = df_res.sort_values(by=["Suggested Action", "Target ($)"], ascending=[False, False])
+        # 2. Detailed Interest Breakdown (The missing part)
+        st.write("---")
+        r2_c1, r2_c2, r2_c3, r2_c4, r2_c5 = st.columns(5)
+        r2_c1.metric("Annual", f"${new_annual_interest:,.2f}")
+        r2_c2.metric("Monthly", f"${new_annual_interest/12:,.2f}")
+        r2_c3.metric("Weekly", f"${new_annual_interest/52:,.2f}")
+        r2_c4.metric("Daily", f"${new_annual_interest/365:,.2f}")
+        r2_c5.metric("Hourly", f"${new_annual_interest/8760:,.4f}")
+
+        # 3. Sorted Dataframe with Column Ordering
+        # Action (🟢 > 🔴 > ⚪) then Portfolio Weight Descending
+        df_res = df_res.sort_values(by=["Suggested Action", "Portfolio Weight"], ascending=[False, False])
 
         st.dataframe(
             df_res.style.format({
-                "Portfolio Weight": "{:.2%}", "Current ($)": "${:,.2f}", 
-                "Target ($)": "${:,.2f}", "Net Move ($)": "${:,.2f}",
-                "Current APY": "{:.4%}", "New APY": "{:.4%}", 
-                "Annual $ Yield": "${:,.2f}", "Yield Contribution": "{:.2%}"
-            }), width='stretch', hide_index=True
+                "Portfolio Weight": "{:.2%}", 
+                "Current ($)": "${:,.2f}", 
+                "Target ($)": "${:,.2f}", 
+                "Net Move ($)": "${:,.2f}",
+                "Current APY": "{:.4%}", 
+                "New APY": "{:.4%}", 
+                "Annual $ Yield": "${:,.2f}", 
+                "Yield Contribution": "{:.2%}"
+            }), 
+            use_container_width=True, 
+            hide_index=True,
+            column_order=[
+                "Market", "Chain", "Suggested Action", "Portfolio Weight", 
+                "Current ($)", "Target ($)", "Net Move ($)", 
+                "Current APY", "New APY", "Annual $ Yield", "Yield Contribution"
+            ]
         )
 else:
     st.warning("Please paste Market IDs or Monarch links in Section 2 to begin.")
