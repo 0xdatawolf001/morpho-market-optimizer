@@ -128,7 +128,10 @@ def get_market_dictionary():
             "Available Liquidity (USD)": available_liquidity,
             "Whitelisted": m.get('whitelisted', False)
         })
-    return pd.DataFrame(processed).drop_duplicates(subset=["Market ID"], keep=False)
+    return (pd.DataFrame(processed) 
+              .drop_duplicates(subset=["Market ID"], keep=False) 
+              .query('Collateral.notna() & (Collateral != "") & (Collateral != " ")') 
+           )
 
 def fetch_live_market_details(selected_df):
     details = []
