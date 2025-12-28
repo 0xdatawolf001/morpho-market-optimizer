@@ -605,24 +605,44 @@ if not df_selected.empty:
         bar_data = []
         for idx, m in enumerate(market_data_list):
             m_name = f"{m['Loan Token']}/{m['Collateral']}"
-            bar_data.append({"Market": m_name, "Strategy": "Best Yield", "Alloc ($)": best_yield_alloc[idx]})
-            bar_data.append({"Market": m_name, "Strategy": "Frontier", "Alloc ($)": frontier_alloc[idx]})
-            bar_data.append({"Market": m_name, "Strategy": "Conc-Adj", "Alloc ($)": car_alloc[idx]})
             
-        df_bar = pd.DataFrame(bar_data)
-        
-        bar_chart = alt.Chart(df_bar).mark_bar().encode(
-            x=alt.X('Strategy', axis=None),
-            y=alt.Y('Alloc ($)', axis=alt.Axis(title='Allocation USD')),
-            color=alt.Color('Strategy', scale=alt.Scale(
-                domain=['Best Yield', 'Frontier', 'Conc-Adj'],
-                range=['#F44336', '#E040FB', '#7C4DFF']
-            )),
-            column=alt.Column('Market', header=alt.Header(titleOrient="bottom", labelOrient="bottom")),
-            tooltip=['Market', 'Strategy', 'Alloc ($)']
-        ).properties(width=80) 
-        
-        st.altair_chart(bar_chart, width='stretch')
+            # Data for the three strategies
+            y_val = best_yield_alloc[idx]
+            f_val = frontier_alloc[idx]
+            c_val = car_alloc[idx]
+            
+            # Only include market if at least one strategy allocates more than $1
+            if y_val > 1 or f_val > 1 or c_val > 1:
+                bar_data.append({"Market": m_name, "Strategy": "Best Yield", "Alloc ($)": y_val})
+                bar_data.append({"Market": m_name, "Strategy": "Frontier", "Alloc ($)": f_val})
+                bar_data.append({"Market": m_name, "Strategy": "Conc-Adj", "Alloc ($)": c_val})
+            
+        if bar_data:
+            df_bar = pd.DataFrame(bar_data)
+            
+            # Using xOffset for side-by-side grouping instead of faceted columns
+            bar_chart = alt.Chart(df_bar).mark_bar().encode(
+                x=alt.X('Market:N', 
+                        title="Market Pair",
+                        axis=alt.Axis(labelAngle=-45)),
+                y=alt.Y('Alloc ($):Q', 
+                        title="Allocation (USD)",
+                        scale=alt.Scale(zero=True)),
+                xOffset='Strategy:N',
+                color=alt.Color('Strategy:N', scale=alt.Scale(
+                    domain=['Best Yield', 'Frontier', 'Conc-Adj'],
+                    range=['#F44336', '#E040FB', '#7C4DFF']
+                )),
+                tooltip=['Market', 'Strategy', alt.Tooltip('Alloc ($)', format='$,.2f')]
+            ).properties(
+                height=400  # Fixed height prevents the "squashed" look
+            ).configure_view(
+                stroke=None
+            )
+            
+            st.altair_chart(bar_chart, width='stretch')
+        else:
+            st.info("No significant allocations to display in chart.")
 
         # --- SELECTION & TABLE RESULTS ---
         st.divider()
@@ -719,7 +739,7 @@ if not df_selected.empty:
                 "Annual $ Yield": "${:,.2f}", 
                 "Yield Contribution": "{:.2%}"
             }), 
-            use_container_width=True, 
+            width='stretch', 
             hide_index=True,
             column_order=[
                 "Market", "Chain", "Suggested Action", "Portfolio Weight", 
