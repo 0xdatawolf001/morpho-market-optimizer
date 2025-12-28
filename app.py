@@ -3,9 +3,9 @@ import requests
 import pandas as pd
 import numpy as np
 import math
-from scipy.optimize import minimize
-from scipy.optimize import differential_evolution
+from scipy.optimize import minimize, differential_evolution
 import time
+import altair as alt
 
 # ==========================================
 # 0. CONFIG & CONSTANTS
@@ -18,6 +18,9 @@ WAD = 1e18
 TARGET_UTILIZATION = 0.9
 CURVE_STEEPNESS = 4.0
 SECONDS_PER_YEAR = 31536000
+
+# Default User Inputs
+DEFAULT_HURDLE_RATE = 4.0
 
 CHAIN_ID_TO_NAME = {
     1: "Ethereum", 10: "Optimism", 130: "Unichain", 137: "Polygon",
@@ -49,7 +52,6 @@ def extract_market_id_from_monarch_link(text: str) -> str:
     """Extract market ID from Monarch link or return original text if not a link"""
     text = text.strip()
     if 'monarchlend.xyz/market/' in text:
-        # Extract the part after the last slash
         parts = text.rstrip('/').split('/')
         if len(parts) >= 2 and parts[-1].startswith('0x'):
             return parts[-1].lower()
@@ -99,22 +101,15 @@ def get_market_dictionary():
         loan = m.get('loanAsset') or {}
         state = m.get('state') or {}
         
-        # Safe float conversion with None handling
         def safe_float(value, default=0.0):
-            """Convert value to float, handling None and invalid values"""
-            if value is None:
-                return default
-            try:
-                return float(value)
-            except (ValueError, TypeError):
-                return default
+            if value is None: return default
+            try: return float(value)
+            except (ValueError, TypeError): return default
         
-        # Get TVL values with safe conversion
         supply_usd = safe_float(state.get('supplyAssetsUsd'))
         borrow_usd = safe_float(state.get('borrowAssetsUsd'))
         available_liquidity = supply_usd - borrow_usd
         
-        # Calculate utilization
         supply_assets = safe_float(state.get('supplyAssets'))
         borrow_assets = safe_float(state.get('borrowAssets'))
         utilization = (borrow_assets / supply_assets * 100) if supply_assets > 0 else 0
@@ -134,9 +129,6 @@ def get_market_dictionary():
             "Whitelisted": m.get('whitelisted', False)
         })
     return pd.DataFrame(processed)
-
-
-
 
 def fetch_live_market_details(selected_df):
     details = []
@@ -171,15 +163,34 @@ def fetch_live_market_details(selected_df):
 # 3. OPTIMIZER
 # ==========================================
 
-from scipy.optimize import differential_evolution
-
 class RebalanceOptimizer:
-    def __init__(self, total_budget, market_list):
+    def __init__(self, total_budget, market_list, hurdle_rate_pct, status_placeholder=None):
         self.total_budget = total_budget 
         self.markets = market_list
+        self.hurdle_rate = hurdle_rate_pct / 100.0
+        self.status_placeholder = status_placeholder
+        
+        # Tracking history
+        self.yield_trace = []    # Best pure yield per iteration
+        self.frontier_trace = [] # Best frontier per iteration
+        self.tangency_trace = [] # Best tangency per iteration
+        self.all_attempts = []   # All evaluated points for scatter
+        
+        # Tracking Best Candidates
+        self.best_yield_val = -1.0
+        self.best_yield_alloc = None
+        
+        self.best_frontier_score = -1.0
+        self.best_frontier_alloc = None
+        self.best_frontier_yield_val = 0.0
+
+        self.best_tangency_score = -999.0
+        self.best_tangency_alloc = None
+        self.best_tangency_yield_val = 0.0
+
+        self.start_time = time.time()
 
     def simulate_apy(self, market, user_new_alloc_usd):
-        # Optimization logic remains the same
         user_existing_wei = market['existing_balance_usd'] * (10**market['Decimals'])
         user_new_wei = user_new_alloc_usd * (10**market['Decimals'])
         other_users_supply_wei = max(0, market['raw_supply'] - user_existing_wei)
@@ -194,43 +205,114 @@ class RebalanceOptimizer:
         
         return rate_per_second_to_apy(new_supply_rate)
 
-    def objective(self, x):
-        # We need to normalize x so the sum always equals total_budget
-        # Differential Evolution is better at bounds than constraints
+    def _get_normalized_allocations(self, x):
         sum_x = np.sum(x)
-        if sum_x == 0: return 0
-        
-        # Scale the weights so they always add up to exactly the total budget
-        scaling_factor = self.total_budget / sum_x
-        normalized_x = x * scaling_factor
-        
+        if sum_x == 0: return x 
+        return x * (self.total_budget / sum_x)
+
+    def objective(self, x):
+        normalized_x = self._get_normalized_allocations(x)
         total_yield = 0
+        weights = normalized_x / self.total_budget if self.total_budget > 0 else np.zeros_like(x)
+        
+        # Calculate yield
         for i, alloc in enumerate(normalized_x):
             total_yield += (alloc * self.simulate_apy(self.markets[i], alloc))
         
+        # Calculate Diversity Metrics
+        # HHI = Sum of squared weights. Range 1/N (diverse) to 1 (concentrated).
+        # We treat HHI as "Risk".
+        hhi = np.sum(weights**2)
+        diversity = 1.0 - hhi
+        
+        # 1. Frontier Score: High Yield + High Diversity
+        frontier_score = total_yield * diversity 
+
+        # 2. Tangency Score: (Return - Hurdle) / Risk(HHI)
+        # We want to maximize excess return per unit of concentration risk
+        hurdle_cost = self.total_budget * self.hurdle_rate
+        excess_return = total_yield - hurdle_cost
+        # Add small epsilon to HHI to avoid division by zero
+        tangency_score = excess_return / (hhi + 1e-9)
+
+        # --- Track Global Bests ---
+        
+        # A. Absolute Best Yield
+        if total_yield > self.best_yield_val:
+            self.best_yield_val = total_yield
+            self.best_yield_alloc = normalized_x
+
+        # B. Best Frontier (Yield * Diversity)
+        if frontier_score > self.best_frontier_score:
+            self.best_frontier_score = frontier_score
+            self.best_frontier_alloc = normalized_x
+            self.best_frontier_yield_val = total_yield
+            
+        # C. Best Tangency (Sharpe-like)
+        if tangency_score > self.best_tangency_score:
+            self.best_tangency_score = tangency_score
+            self.best_tangency_alloc = normalized_x
+            self.best_tangency_yield_val = total_yield
+
+        # Record attempt for Scatter Plot
+        self.all_attempts.append({
+            "Annual Yield ($)": total_yield,
+            "Blended APY": total_yield / self.total_budget if self.total_budget > 0 else 0,
+            "Diversity Score": diversity,
+            "Type": "Explored" 
+        })
+        
         return -total_yield
+
+    def callback(self, xk, convergence):
+        # Called after each iteration (population evolution)
+        if self.status_placeholder:
+            elapsed = time.time() - self.start_time
+            
+            # Record current bests for the line chart
+            self.yield_trace.append(self.best_yield_val)
+            self.frontier_trace.append(self.best_frontier_yield_val)
+            self.tangency_trace.append(self.best_tangency_yield_val)
+
+            self.status_placeholder.markdown(
+                f"""
+                **⚡ Exploring Optimization Space...**
+                - Evaluated Portfolios: `{len(self.all_attempts)}`
+                - Iteration: `{len(self.yield_trace)}`
+                - Best APY Found: `{ (self.best_yield_val/self.total_budget):.4%}`
+                - Elapsed: `{elapsed:.1f}s`
+                """
+            )
 
     def optimize(self):
         n = len(self.markets)
-        # Bounds: each market can have between 0 and the total budget
+        if n == 0: return None, None, None
         bounds = [(0, self.total_budget)] * n
+        self.yield_trace = []
+        self.frontier_trace = []
+        self.tangency_trace = []
+        self.all_attempts = []
         
-        # Differential Evolution is a "Global" solver
+        # Add initial guesses (corners) to help it find edges
+        init_pop = []
+        for i in range(min(n, 10)):
+            g = np.zeros(n)
+            g[i] = self.total_budget
+            init_pop.append(g)
+        # Add balanced guess
+        init_pop.append(np.ones(n) * (self.total_budget/n))
+        
+        init = np.array(init_pop) if len(init_pop) >= 5 else None
+
         res = differential_evolution(
-            self.objective,
-            bounds,
-            strategy='best1bin', # Tries to find the best, then perturbs it
-            maxiter=1000,
-            popsize=15,          # Number of portfolios to maintain simultaneously
-            tol=0.01,
-            mutation=(0.5, 1),   # This is the "backtracking" / jumping logic
-            recombination=0.7
+            self.objective, bounds, strategy='best1bin',
+            maxiter=500, popsize=15, tol=0.01,
+            init=init if init is not None and init.shape[0] >= 5 else 'latinhypercube',
+            mutation=(0.5, 1), recombination=0.7,
+            callback=self.callback
         )
-        
-        if res.success:
-            # Re-normalize the final answer to ensure budget parity
-            return res.x * (self.total_budget / np.sum(res.x))
-        return None
+        # Return all 3 portfolios
+        return self.best_yield_alloc, self.best_frontier_alloc, self.best_tangency_alloc
 
 # ==========================================
 # 4. STREAMLIT UI
@@ -244,26 +326,15 @@ st.title("⚖️ Morpho Portfolio Optimizer")
 if "market_dict" not in st.session_state:
     st.session_state.market_dict = get_market_dictionary()
 
-df_all = st.session_state.market_dict
-# --- ADD THIS AFTER df_all = st.session_state.market_dict ---
 df_all = st.session_state.market_dict.copy()
-df_all['Supply APY'] = pd.to_numeric(df_all['Supply APY'], errors='coerce').fillna(0.0)
-df_all['Utilization'] = pd.to_numeric(df_all['Utilization'], errors='coerce').fillna(0.0)
-df_all['Available Liquidity (USD)'] = pd.to_numeric(df_all['Available Liquidity (USD)'], errors='coerce').fillna(0.0)
-df_all['Total Supply (USD)'] = pd.to_numeric(df_all['Total Supply (USD)'], errors='coerce').fillna(0.0)
-df_all['Total Borrow (USD)'] = pd.to_numeric(df_all['Total Borrow (USD)'], errors='coerce').fillna(0.0)
+cols_to_num = ['Supply APY', 'Utilization', 'Available Liquidity (USD)', 'Total Supply (USD)', 'Total Borrow (USD)']
+for c in cols_to_num:
+    df_all[c] = pd.to_numeric(df_all[c], errors='coerce').fillna(0.0)
 
 st.subheader("1. Market Discovery")
 st.caption("Use the filters below to narrow down markets, then copy Market IDs for optimization.")
-st.markdown(
-    "The tool assumes that you have selected a candidate list of markets. "
-    "The tool assumes USD stables = 1 USD and only works for USD stables. "
-    "Do not use for any other loan token. "
-    "The tool also assumes that you have sensibly chosen the pools you are comfortable to invest in. "
-    "You can use [Monarch Lend](https://monarchlend.xyz) to help you find markets as this should not be your primary market discovery tool"
-)
 
-# Prepare Token Display names for the multi-selects
+# Prepare Token Display names
 def get_tokens(df, col):
     items = []
     for _, r in df.iterrows():
@@ -275,7 +346,6 @@ def get_tokens(df, col):
 
 loan_tokens = get_tokens(df_all, 'Loan Token')
 collateral_tokens = get_tokens(df_all, 'Collateral')
-
 unique_loan_disp = sorted(list(set(x['disp'] for x in loan_tokens)))
 unique_coll_disp = sorted(list(set(x['disp'] for x in collateral_tokens)))
 unique_chains = sorted(df_all['Chain'].dropna().unique().tolist())
@@ -283,108 +353,51 @@ unique_chains = sorted(df_all['Chain'].dropna().unique().tolist())
 # --- FILTER FORM ---
 with st.form("market_filter_form"):
     f_col1, f_col2, f_col3 = st.columns(3)
-    with f_col1:
-        sel_chains = st.multiselect("Chains", options=unique_chains)
-    with f_col2:
-        sel_loans = st.multiselect("Loan Tokens", options=unique_loan_disp)
-    with f_col3:
-        sel_colls = st.multiselect("Collateral Tokens", options=unique_coll_disp)
-
+    with f_col1: sel_chains = st.multiselect("Chains", options=unique_chains)
+    with f_col2: sel_loans = st.multiselect("Loan Tokens", options=unique_loan_disp)
+    with f_col3: sel_colls = st.multiselect("Collateral Tokens", options=unique_coll_disp)
     show_whitelisted = st.checkbox("Whitelisted?", value=False)
-
     st.markdown("---")
     r1_c1, r1_c2 = st.columns(2)
-    with r1_c1:
-        st.write("**Supply APY %**")
-        sc1, sc2 = st.columns(2)
-        m_apy_in = sc1.number_input("Min %", 0.0, 200.0, 0.0, step=1.0, key="m_apy_in")
-        x_apy_in = sc2.number_input("Max %", 0.0, 200.0, 200.0, step=1.0, key="x_apy_in")
-    
-    with r1_c2:
-        st.write("**Utilization %**")
-        uc1, uc2 = st.columns(2)
-        m_util_in = uc1.number_input("Min %", 0.0, 100.0, 0.0, step=5.0, key="m_util_in")
-        x_util_in = uc2.number_input("Max %", 0.0, 100.0, 100.0, step=5.0, key="x_util_in")
-
-    st.write("**Liquidity & Supply (USD)**")
-    r2_c1, r2_c2 = st.columns(2)
-    m_liq_in = r2_c1.number_input("Min Liquidity (USD)", 0.0, 1e15, 0.0, step=10000.0)
-    m_sup_in = r2_c2.number_input("Min Total Supply (USD)", 0.0, 1e15, 0.0, step=10000.0)
-
+    m_apy_in = r1_c1.number_input("Min APY %", 0.0, 200.0, 0.0)
+    x_apy_in = r1_c1.number_input("Max APY %", 0.0, 200.0, 200.0)
+    m_util_in = r1_c2.number_input("Min Util %", 0.0, 100.0, 0.0)
+    x_util_in = r1_c2.number_input("Max Util %", 0.0, 100.0, 100.0)
     apply_btn = st.form_submit_button("Apply Filters", type="primary", use_container_width=True)
 
 # --- FILTER APPLICATION ---
 df_filtered = df_all.copy()
-if sel_chains:
-    df_filtered = df_filtered[df_filtered['Chain'].isin(sel_chains)]
+if sel_chains: df_filtered = df_filtered[df_filtered['Chain'].isin(sel_chains)]
 if sel_loans:
     target_ids = [x['id'] for x in loan_tokens if x['disp'] in sel_loans]
     df_filtered = df_filtered[df_filtered['Market ID'].isin(target_ids)]
 if sel_colls:
     target_ids = [x['id'] for x in collateral_tokens if x['disp'] in sel_colls]
     df_filtered = df_filtered[df_filtered['Market ID'].isin(target_ids)]
-if show_whitelisted:
-    df_filtered = df_filtered[df_filtered['Whitelisted'] == True]
+if show_whitelisted: df_filtered = df_filtered[df_filtered['Whitelisted'] == True]
 
 df_filtered = df_filtered[
     (df_filtered['Supply APY'] >= (m_apy_in / 100.0)) & 
     (df_filtered['Supply APY'] <= (x_apy_in / 100.0)) &
     (df_filtered['Utilization'] >= m_util_in) & 
-    (df_filtered['Utilization'] <= x_util_in) &
-    (df_filtered['Available Liquidity (USD)'] >= m_liq_in) &
-    (df_filtered['Total Supply (USD)'] >= m_sup_in)
+    (df_filtered['Utilization'] <= x_util_in)
 ]
 
-# --- RESULTS DISPLAY ---
-# Create a copy for display so we don't alter the actual data used in the optimizer
-df_display = df_filtered.copy()
-
-# Transform decimal APY (0.05) to percentage points (5.00) for display
-df_display['Supply APY'] = df_display['Supply APY'] * 100 
-
-st.dataframe(
-    df_display,
-    use_container_width=True,
-    hide_index=True,
-    column_order=[
-        "Whitelisted", "Chain", "Loan Token", "Collateral", 
-        "Supply APY", "Utilization", 
-        "Total Supply (USD)", "Total Borrow (USD)", "Available Liquidity (USD)",
-        "Market ID"
-    ],
-    column_config={
-        "Whitelisted": st.column_config.CheckboxColumn("Whitelisted?"),
-        "Supply APY": st.column_config.NumberColumn(
-            "Supply APY", 
-            format="%.2f%%",
-            help="Annual Percentage Yield (Percentage)"
-        ),
-        "Utilization": st.column_config.NumberColumn(
-            "Utilization", 
-            format="%.2f%%",
-            help="Current market utilization"
-        ),
-        "Total Supply (USD)": st.column_config.NumberColumn("Total Supply (USD)", format="dollar"),
-        "Total Borrow (USD)": st.column_config.NumberColumn("Total Borrow (USD)", format="dollar"),
-        "Available Liquidity (USD)": st.column_config.NumberColumn("Avail. Liquidity (USD)", format="dollar")
-    }
-)
+st.dataframe(df_filtered, use_container_width=True, hide_index=True)
 
 st.divider()
 
 # --- UI SECTION 2: SCOPE & REBALANCE ---
-col_scope, col_cash = st.columns([2, 1])
+col_scope, col_param = st.columns([2, 1])
 
 with col_scope:
     st.subheader("2. Your Portfolio Scope")
     raw_ids = st.text_area(
-        "Paste Market IDs or Monarch links to optimize (one per line)", 
+        "Paste Market IDs or Monarch links (one per line)", 
         value="", 
-        height=300,
-        placeholder="Market IDs\n0x347aa5f94a12dd46d3e17e542ca1c4033bd6952bde4b22af3caa33c82e52451a\n0x81b97c7305aca46c62f2ffce63a09c6a4d647163e25f31c44fadcbeab838b3f8\n\n- Monarch Links\nhttps://www.monarchlend.xyz/market/1/0x5ffdf15c5a4d7c6affb3f12634eeda1a20e60b92c0eb547f61754f656b55841e\nhttps://www.monarchlend.xyz/market/1/0xc7d717f4052ac4e5463dcc58cea0f6b05dd7d8c67e0aee68ebe30a8af09b259f\nhttps://www.monarchlend.xyz/market/1/0x0655e0c8686d94d9e0c0d2b78d7f99492676e52d712db5ac061b3c78da4b7587\nhttps://www.monarchlend.xyz/market/1/0x3f1d5c88c72432b04f2074499fe217468af49ddaa98bcb6ec80b08f76a82c6ec",
-        help="💡 Copy Market IDs from the filtered table above OR paste Monarch links. The optimizer will find the best allocation across these markets."
+        height=200,
+        placeholder="Market IDs or Links..."
     )
-    # Process each line to extract market IDs from links or use raw IDs
     clean_ids = []
     for line in raw_ids.replace(',', '\n').split('\n'):
         line = line.strip()
@@ -395,20 +408,22 @@ with col_scope:
     
     df_selected = df_all[df_all['Market ID'].str.lower().isin(clean_ids)].copy()
 
-
-with col_cash:
-    st.subheader("3. Budget")
-    new_cash = st.number_input(
-        "Additional New Cash (USD)", 
-        value=0.0, 
-        step=1000.0,
-        help="💡 This is fresh capital you want to deploy. Set to $0 if only rebalancing existing positions."
+with col_param:
+    st.subheader("3. Parameters")
+    new_cash = st.number_input("Additional New Cash (USD)", value=0.0, step=1000.0)
+    # Hurdle Rate Box
+    st.markdown("**Tangency Portfolio Setting**")
+    hurdle_rate = st.number_input(
+        "Hurdle Rate (Risk Free %)", 
+        min_value=0.0, max_value=100.0, 
+        value=DEFAULT_HURDLE_RATE, step=0.1,
+        help="Used to calculate the Tangency Portfolio (Excess Return / Concentration Risk)"
     )
 
 if not df_selected.empty:
-    st.info("💡 Enter your current USD holdings for the selected markets below:")
+    st.info("💡 Enter your current USD holdings for the selected markets:")
     
-    # Persistent balance logic
+    # Track existing balances
     df_selected['Existing Balance (USD)'] = df_selected['Market ID'].apply(lambda x: st.session_state.balance_cache.get(x, 0.0))
     
     edited_df = st.data_editor(
@@ -424,152 +439,251 @@ if not df_selected.empty:
     current_wealth = edited_df['Existing Balance (USD)'].sum()
     total_optimizable = current_wealth + new_cash
 
-
     # ==========================================
-    # LIVE METRICS DISPLAY
+    # LIVE METRICS & OPTIMIZATION LOGIC
     # ==========================================
     st.divider()
     metric_col1, metric_col2, metric_col3 = st.columns(3)
-    
-    with metric_col1:
-        st.metric(
-            label="💰 Total Current Balance",
-            value=f"${current_wealth:,.2f}",
-            help="Sum of all existing balances entered above"
-        )
-    
-    with metric_col2:
-        st.metric(
-            label="💵 Additional cash to invest",
-            value=f"${new_cash:,.2f}",
-            help="New cash entered in Budget section"
-        )
-    
-    with metric_col3:
-        st.metric(
-            label="📊 Total Balance",
-            value=f"${total_optimizable:,.2f}",
-            delta=f"${new_cash:,.2f}" if new_cash > 0 else None,
-            delta_color="normal",
-            help="Current Balance + Fresh Cash = Total available for optimization"
-        )
+    metric_col1.metric("💰 Total Current Balance", f"${current_wealth:,.2f}")
+    metric_col2.metric("💵 Additional cash", f"${new_cash:,.2f}")
+    metric_col3.metric("📊 Total Optimizable", f"${total_optimizable:,.2f}")
     
     st.divider()
 
+    # Portfolio Explanations placed above the button
+    with st.expander("ℹ️ About the Portfolio Strategies", expanded=True):
+        col_info1, col_info2, col_info3 = st.columns(3)
+        with col_info1:
+            st.markdown("**🔴 Best Yield**")
+            st.caption("Prioritizes raw APY above all else. May result in high concentration in a single market.")
+        with col_info2:
+            st.markdown("**🟣 Tangency**")
+            st.caption("Maximizes Excess Return per unit of Concentration Risk. Uses your 'Hurdle Rate' as the risk-free benchmark.")
+        with col_info3:
+            st.markdown("**🌸 Frontier (Diversified)**")
+            st.caption("Balances Yield and Diversity (HHI). Seeks the highest yield possible while maintaining a distributed allocation.")
+
+    # --- BUTTON TO RUN AND SAVE TO STATE ---
     if st.button("🚀 Run Optimization", type="primary", use_container_width=True):
         market_data_list = fetch_live_market_details(df_selected)
         for m in market_data_list:
             m['existing_balance_usd'] = st.session_state.balance_cache.get(m['Market ID'], 0.0)
 
-        # 1. Calculate Pre-Optimization Metrics (FIXED)
-        # Current blended APY should ONLY consider existing deployed capital
+        # Pre-Optimization Stats
         current_annual_interest = sum(m['existing_balance_usd'] * m['current_supply_apy'] for m in market_data_list)
         current_blended_apy = current_annual_interest / current_wealth if current_wealth > 0 else 0.0
 
-        # 2. Run Optimizer
-        opt = RebalanceOptimizer(total_optimizable, market_data_list)
-        allocations = opt.optimize()
+        # Run Optimizer
+        status_container = st.empty()
+        opt = RebalanceOptimizer(total_optimizable, market_data_list, hurdle_rate, status_container)
+        best_yield_alloc, frontier_alloc, tangency_alloc = opt.optimize()
+        status_container.empty()
 
-        if allocations is not None:
-            st.divider()
-            results = []
-            new_annual_interest = 0
+        # Save results to session state to prevent reset on interaction
+        st.session_state['opt_results'] = {
+            'market_data_list': market_data_list,
+            'opt_object': opt,
+            'best_yield_alloc': best_yield_alloc,
+            'frontier_alloc': frontier_alloc,
+            'tangency_alloc': tangency_alloc,
+            'current_metrics': {
+                'annual_interest': current_annual_interest,
+                'blended_apy': current_blended_apy
+            },
+            'traces': {
+                'yield': opt.yield_trace,
+                'frontier': opt.frontier_trace,
+                'tangency': opt.tangency_trace
+            },
+            'attempts': opt.all_attempts
+        }
+
+    # ==========================================
+    # DISPLAY RESULTS (IF THEY EXIST)
+    # ==========================================
+    if 'opt_results' in st.session_state and st.session_state['opt_results']['best_yield_alloc'] is not None:
+        
+        # Load from State
+        res_data = st.session_state['opt_results']
+        opt = res_data['opt_object'] # NOTE: This object is stale but methods work if stateless
+        market_data_list = res_data['market_data_list']
+        best_yield_alloc = res_data['best_yield_alloc']
+        frontier_alloc = res_data['frontier_alloc']
+        tangency_alloc = res_data['tangency_alloc']
+        
+        # Helper to calc point stats for chart
+        def get_stats(alloc):
+            y = 0
+            for i, val in enumerate(alloc):
+                y += (val * opt.simulate_apy(market_data_list[i], val))
+            weights = alloc/total_optimizable if total_optimizable > 0 else np.zeros_like(alloc)
+            div = 1.0 - np.sum(weights**2)
+            return y, y/total_optimizable if total_optimizable>0 else 0, div
+
+        y_abs, y_apy, y_div = get_stats(best_yield_alloc)
+        f_abs, f_apy, f_div = get_stats(frontier_alloc)
+        t_abs, t_apy, t_div = get_stats(tangency_alloc)
+
+        # Prepare Scatter Data
+        df_scatter = pd.DataFrame(res_data['attempts'])
+        
+        highlights = pd.DataFrame([
+            {"Diversity Score": y_div, "Blended APY": y_apy, "Type": "Best Yield", "Size": 100, "Color": "#F44336"},
+            {"Diversity Score": f_div, "Blended APY": f_apy, "Type": "Frontier (Div)", "Size": 100, "Color": "#E040FB"}, # Magenta
+            {"Diversity Score": t_div, "Blended APY": t_apy, "Type": "Tangency", "Size": 100, "Color": "#7C4DFF"}       # Purple
+        ])
+        
+        # --- CHART SECTION ---
+        st.subheader("📊 Optimization Search Space")
+        col_graph1, col_graph2 = st.columns(2)
+        
+        # 1. SCATTER PLOT
+        with col_graph1:
+            st.markdown("**Efficiency Frontier**")
             
-            for i, target_alloc in enumerate(allocations):
-                m = market_data_list[i]
-                new_apy = opt.simulate_apy(m, target_alloc)
-                net_move = target_alloc - m['existing_balance_usd']
-                
-                new_annual_interest += (target_alloc * new_apy)
-                
-                action = "🟢 DEPOSIT" if net_move > 0.01 else ("🔴 WITHDRAW" if net_move < -0.01 else "⚪ HOLD")
-                weight_pct = target_alloc / total_optimizable if total_optimizable > 0 else 0.0
-
-                results.append({
-                    "Market": f"{m['Loan Token']} / {m['Collateral']}",
-                    "Chain": m['Chain'], 
-                    "Suggested Action": action,
-                    "Portfolio Weight": weight_pct,
-                    "Current ($)": m['existing_balance_usd'],
-                    "Target ($)": target_alloc,
-                    "Net Move ($)": net_move,
-                    "Current APY": m['current_supply_apy'],
-                    "New APY": new_apy,
-                    "Annual $ Yield Contribution": target_alloc * new_apy,
-                    "Market ID": m['Market ID']
-                })
-            
-            # 3. Calculate Post-Optimization Metrics
-            new_blended_apy = new_annual_interest / total_optimizable if total_optimizable > 0 else 0.0
-            
-            # Calculate APY improvement correctly
-            if current_wealth > 0:
-                apy_diff = new_blended_apy - current_blended_apy
-                interest_diff = new_annual_interest - current_annual_interest
-            else:
-                apy_diff = new_blended_apy  # All new deployment
-                interest_diff = new_annual_interest
-
-            # --- METRICS DISPLAY ---
-            st.subheader("Results")
-            
-            # Show current vs optimized
-            if current_wealth > 0:
-                m1, m2, m3, m4, m5 = st.columns(5)
-                m1.metric(
-                    "Current Deployed APY", 
-                    f"{current_blended_apy:.4%}",
-                    help="Weighted APY of existing balances only"
-                )
-                m2.metric(
-                    "Optimized Blended APY", 
-                    f"{new_blended_apy:.4%}", 
-                    delta=f"{apy_diff*100:.3f}%",
-                    help="Projected APY after deploying all capital"
-                )
-                m3.metric("Current Deployed Capital", f"${current_wealth:,.2f}")
-                m4.metric("Total Optimized Wealth (1 Yr)", f"${total_optimizable+new_annual_interest:,.2f}")
-                m5.metric("Additional Interest Gain From Optimization", f"${interest_diff:,.2f}")
-            else:
-                # New portfolio - no "current" metrics
-                m1, m2, m3 = st.columns(3)
-                m1.metric("Optimized Blended APY", f"{new_blended_apy:.4%}")
-                m2.metric("Total Capital Deployed", f"${total_optimizable:,.2f}")
-                m3.metric("Annual Interest", f"${new_annual_interest:,.2f}")
-
-            st.divider()
-
-            # Row 2: Absolute Interest Breakdown (unchanged)
-            r2_c1, r2_c2, r2_c3, r2_c4, r2_c5 = st.columns(5)
-            r2_c1.metric("Annual Interest", f"${new_annual_interest:,.2f}")
-            r2_c2.metric("Monthly Interest", f"${new_annual_interest/12:,.2f}")
-            r2_c3.metric("Weekly Interest", f"${new_annual_interest/52:,.2f}")
-            r2_c4.metric("Daily Interest", f"${new_annual_interest/365:,.2f}")
-            r2_c5.metric("Hourly Interest", f"${new_annual_interest/8760:,.4f}")
-            
-            df_res = pd.DataFrame(results)
-
-            # Sort by Suggested Action first, then Portfolio Weight descending
-            df_res_sorted = df_res.sort_values(
-                by=["Suggested Action", "Portfolio Weight"], 
-                ascending=[False, False]  # True for Suggested Action, False for Portfolio Weight
+            base = alt.Chart(df_scatter).mark_circle(opacity=0.3, color='#80DEEA').encode(
+                x=alt.X('Diversity Score', title='Diversity (1 - HHI)'),
+                y=alt.Y('Blended APY', title='APY', axis=alt.Axis(format='%')),
+                tooltip=['Diversity Score', 'Blended APY', 'Annual Yield ($)']
             )
-
-            st.dataframe(
-                df_res_sorted.style.format({
-                    "Portfolio Weight": "{:.2%}",
-                    "Current ($)": "${:,.2f}", 
-                    "Target ($)": "${:,.2f}", 
-                    "Net Move ($)": "${:,.2f}",
-                    "Current APY": "{:.4%}", 
-                    "New APY": "{:.4%}",
-                    "Annual $ Yield Contribution": "${:,.2f}",
-                }), 
-                use_container_width=True, 
-                hide_index=True,
-                column_order=[
-                    "Market", "Chain", "Suggested Action", "Portfolio Weight", 
-                    "Current ($)", "Target ($)", "Net Move ($)", 
-                    "Current APY", "New APY", "Annual $ Yield Contribution"
-                ]
+            
+            points = alt.Chart(highlights).mark_circle(size=200, opacity=1.0).encode(
+                x='Diversity Score',
+                y='Blended APY',
+                color=alt.Color('Type', scale=alt.Scale(
+                    domain=['Best Yield', 'Frontier (Div)', 'Tangency'],
+                    range=['#F44336', '#E040FB', '#7C4DFF'] # Red, Magenta, Purple
+                )),
+                tooltip=['Type', 'Blended APY', 'Diversity Score']
             )
+            
+            st.altair_chart(base + points, use_container_width=True)
+            st.caption("Red: Max Yield. Magenta: Max Diversity. Purple: Tangency (Risk Adjusted).")
+
+        # 2. LINE CHART (CONVERGENCE)
+        with col_graph2:
+            st.markdown("**Yield Convergence**")
+            
+            traces = res_data['traces']
+            df_hist = pd.DataFrame({
+                "Iteration": range(len(traces['yield'])),
+                "Best Yield ($)": traces['yield'],
+                "Frontier Yield ($)": traces['frontier'],
+                "Tangency Yield ($)": traces['tangency']
+            })
+            
+            df_hist_long = df_hist.melt('Iteration', var_name='Strategy', value_name='Yield')
+            
+            line_chart = alt.Chart(df_hist_long).mark_line().encode(
+                x='Iteration',
+                y='Yield',
+                color=alt.Color('Strategy', scale=alt.Scale(
+                    domain=['Best Yield ($)', 'Frontier Yield ($)', 'Tangency Yield ($)'],
+                    range=['#F44336', '#E040FB', '#7C4DFF']
+                ))
+            )
+            st.altair_chart(line_chart, use_container_width=True)
+
+        # --- MULTI-BAR CHART (ALL PORTFOLIOS) ---
+        st.divider()
+        st.markdown("**Allocation Comparison (All Strategies)**")
+        
+        # Construct long-format DF for Grouped Bar Chart
+        bar_data = []
+        for idx, m in enumerate(market_data_list):
+            m_name = f"{m['Loan Token']}/{m['Collateral']}"
+            bar_data.append({"Market": m_name, "Strategy": "Best Yield", "Alloc ($)": best_yield_alloc[idx]})
+            bar_data.append({"Market": m_name, "Strategy": "Frontier", "Alloc ($)": frontier_alloc[idx]})
+            bar_data.append({"Market": m_name, "Strategy": "Tangency", "Alloc ($)": tangency_alloc[idx]})
+            
+        df_bar = pd.DataFrame(bar_data)
+        
+        bar_chart = alt.Chart(df_bar).mark_bar().encode(
+            x=alt.X('Strategy', axis=None),
+            y=alt.Y('Alloc ($)', axis=alt.Axis(title='Allocation USD')),
+            color=alt.Color('Strategy', scale=alt.Scale(
+                domain=['Best Yield', 'Frontier', 'Tangency'],
+                range=['#F44336', '#E040FB', '#7C4DFF']
+            )),
+            column=alt.Column('Market', header=alt.Header(titleOrient="bottom", labelOrient="bottom")),
+            tooltip=['Market', 'Strategy', 'Alloc ($)']
+        ).properties(width=80) 
+        
+        # Added use_container_width=True to fill screen
+        st.altair_chart(bar_chart, use_container_width=True)
+
+        # --- SELECTION & TABLE RESULTS ---
+        st.divider()
+        
+        st.subheader("🔍 Results")
+
+        # This Radio button only toggles the Table View, not the charts
+        strategy_choice = st.radio(
+            "View Details For:",
+            ["Best Yield (Red)", "Frontier / Diversified (Magenta)", "Tangency (Purple)"],
+            horizontal=True
+        )
+        
+        if "Best Yield" in strategy_choice:
+            final_alloc = best_yield_alloc
+        elif "Frontier" in strategy_choice:
+            final_alloc = frontier_alloc
+        else:
+            final_alloc = tangency_alloc
+
+        # Calculate Final Table Details based on selection
+        results = []
+        new_annual_interest = 0
+        
+        for i, target_val in enumerate(final_alloc):
+            m = market_data_list[i]
+            # Use current stateless optimizer method for calc
+            new_apy = opt.simulate_apy(m, target_val)
+            new_annual_interest += (target_val * new_apy)
+            net_move = target_val - m['existing_balance_usd']
+            action = "🟢 DEPOSIT" if net_move > 0.01 else ("🔴 WITHDRAW" if net_move < -0.01 else "⚪ HOLD")
+            
+            results.append({
+                "Market": f"{m['Loan Token']}/{m['Collateral']}",
+                "Chain": m['Chain'], 
+                "Suggested Action": action,
+                "Portfolio Weight": target_val / total_optimizable if total_optimizable > 0 else 0,
+                "Current ($)": m['existing_balance_usd'],
+                "Target ($)": target_val,
+                "Net Move ($)": net_move,
+                "Current APY": m['current_supply_apy'],
+                "New APY": new_apy,
+                "Annual $ Yield": target_val * new_apy,
+            })
+        
+        df_res = pd.DataFrame(results)
+        
+        # Add Yield Contribution Column
+        total_gen_yield = df_res["Annual $ Yield"].sum()
+        df_res["Yield Contribution"] = df_res["Annual $ Yield"].apply(
+            lambda x: x / total_gen_yield if total_gen_yield > 0 else 0
+        )
+        
+        current_blended = res_data['current_metrics']['blended_apy']
+        current_ann = res_data['current_metrics']['annual_interest']
+        new_blended_apy = new_annual_interest / total_optimizable if total_optimizable > 0 else 0.0
+        
+        # Financial Summary for selected strategy
+        res_m1, res_m2, res_m3 = st.columns(3)
+        res_m1.metric("Current APY", f"{current_blended:.4%}")
+        res_m2.metric("Optimized APY", f"{new_blended_apy:.4%}", delta=f"{(new_blended_apy-current_blended)*100:.3f}%")
+        res_m3.metric("Total Annual Interest", f"${new_annual_interest:,.2f}", delta=f"${new_annual_interest-current_ann:,.2f}")
+
+        # Sorting: Action (Descending: 🟢 > 🔴 > ⚪) then Target ($) Descending
+        df_res = df_res.sort_values(by=["Suggested Action", "Target ($)"], ascending=[False, False])
+
+        st.dataframe(
+            df_res.style.format({
+                "Portfolio Weight": "{:.2%}", "Current ($)": "${:,.2f}", 
+                "Target ($)": "${:,.2f}", "Net Move ($)": "${:,.2f}",
+                "Current APY": "{:.4%}", "New APY": "{:.4%}", 
+                "Annual $ Yield": "${:,.2f}", "Yield Contribution": "{:.2%}"
+            }), use_container_width=True, hide_index=True
+        )
+else:
+    st.warning("Please paste Market IDs or Monarch links in Section 2 to begin.")
