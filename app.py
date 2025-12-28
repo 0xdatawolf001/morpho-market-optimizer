@@ -324,9 +324,6 @@ cols_to_num = ['Supply APY', 'Utilization', 'Available Liquidity (USD)', 'Total 
 for c in cols_to_num:
     df_all[c] = pd.to_numeric(df_all[c], errors='coerce').fillna(0.0)
 
-st.subheader("1. Market Discovery")
-st.caption("Use the filters below to narrow down markets, then copy Market IDs for optimization.")
-
 # Simplified token helper: returns sorted list of unique symbols
 def get_tokens(df, col):
     print(f"[Execution] Extracting unique symbols for column: {col}")
