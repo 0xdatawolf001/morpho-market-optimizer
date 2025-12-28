@@ -398,7 +398,7 @@ with col_scope:
     raw_ids = st.text_area(
         "Paste Market IDs or Monarch links (one per line)", 
         value="", 
-        height=200,
+        height=235,
         placeholder="Market IDs or Links..."
     )
     clean_ids = []
@@ -415,9 +415,8 @@ with col_param:
     st.subheader("3. Parameters")
     new_cash = st.number_input("Additional New Cash (USD)", value=0.0, step=1000.0)
     # Hurdle Rate Box - Updated to allow negative values
-    st.markdown("**Concentration-Adj Setting**")
     hurdle_rate = st.number_input(
-        "Hurdle Rate (Risk Free %)", 
+        "Concentration-Adj Setting: Hurdle Rate (Risk Free %)", 
         min_value=-100.0, # Now allows negative values down to -100%
         max_value=100.0, 
         value=DEFAULT_HURDLE_RATE, 
