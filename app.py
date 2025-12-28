@@ -181,16 +181,36 @@ class RebalanceOptimizer:
         self.start_time = time.time()
 
     def simulate_apy(self, market, user_new_alloc_usd):
-        user_existing_wei = market['existing_balance_usd'] * (10**market['Decimals'])
-        user_new_wei = user_new_alloc_usd * (10**market['Decimals'])
+        # 1. SHORT-CIRCUIT: If the change is negligible (less than 1 micro-cent), 
+        # return the current APY. This prevents phantom interest fluctuations.
+        change_threshold = 1e-15 
+        if abs(user_new_alloc_usd - market['existing_balance_usd']) < change_threshold:
+            return market['current_supply_apy']
+        
+        # 2. CONVERT TO WEI: Calculate user's existing and new allocation
+        # Use round() to avoid float noise (e.g., 0.9999999999999999 -> 1.0)
+        multiplier = 10**market['Decimals']
+        user_existing_wei = market['existing_balance_usd'] * multiplier
+        user_new_wei = user_new_alloc_usd * multiplier
+        
+        # 3. CALCULATE OTHER USERS: Extract everyone else's money from the pool
+        # We subtract the user's specific contribution from the raw total
         other_users_supply_wei = max(0, market['raw_supply'] - user_existing_wei)
+        
+        # 4. SIMULATE TOTAL: Add the NEW allocation back to the pool
         simulated_total_supply_wei = other_users_supply_wei + user_new_wei
         
-        if simulated_total_supply_wei <= 0: return 0.0
+        if simulated_total_supply_wei <= 0: 
+            return 0.0
         
+        # 5. CALCULATE UTILIZATION: Borrow / Supply
         new_util = market['raw_borrow'] / simulated_total_supply_wei
+        
+        # 6. APPLY MORPHO CURVE LOGIC
         new_mult = compute_curve_multiplier(new_util)
         new_borrow_rate = market['rate_at_target'] * new_mult
+        
+        # 7. FINAL APY: Supply Rate = Borrow Rate * Utilization * (1 - Fee)
         new_supply_rate = new_borrow_rate * new_util * (1 - market['fee'])
         
         return rate_per_second_to_apy(new_supply_rate)
