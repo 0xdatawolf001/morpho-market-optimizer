@@ -295,7 +295,7 @@ class RebalanceOptimizer:
         
         # Add initial guesses (corners) to help it find edges
         init_pop = []
-        for i in range(min(n, 10)):
+        for i in range(min(n, 50)):
             g = np.zeros(n)
             g[i] = self.total_budget
             init_pop.append(g)
