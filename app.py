@@ -306,7 +306,7 @@ class RebalanceOptimizer:
 
         res = differential_evolution(
             self.objective, bounds, strategy='best1bin',
-            maxiter=500, popsize=15, tol=0.01,
+            maxiter=10000, popsize=15, tol=0.01,
             init=init if init is not None and init.shape[0] >= 5 else 'latinhypercube',
             mutation=(0.5, 1), recombination=0.7,
             callback=self.callback
