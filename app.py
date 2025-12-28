@@ -425,6 +425,14 @@ with col_param:
         help="Used to calculate the Concentration-Adjusted Return. A negative rate acts as a yield bonus/subsidy."
     )
 
+    # --- NEW CODE START ---
+    min_move_thresh = st.number_input(
+        "Min Rebalance Threshold ($)", 
+        value=100.0, 
+        step=50.0, 
+        help="If a suggested move (deposit or withdraw) is less than this amount, the tool will recommend holding instead."
+    )
+
 if not df_selected.empty:
     st.info("💡 Enter your current USD holdings for the selected markets:")
     
@@ -652,16 +660,31 @@ if not df_selected.empty:
         else:
             final_alloc = car_alloc
 
-        # Calculate Final Table Details based on selection
+        # --- UPDATED LOGIC START ---
         results = []
         new_annual_interest = 0
+        skipped_count = 0 # Track skipped small moves
         
-        for i, target_val in enumerate(final_alloc):
+        for i, raw_target in enumerate(final_alloc):
             m = market_data_list[i]
-            # Use current stateless optimizer method for calc
+            
+            # 1. Calculate raw difference first
+            raw_diff = raw_target - m['existing_balance_usd']
+            
+            # 2. Check Threshold Logic
+            # If the move is smaller than threshold (but not effectively zero), cancel the move
+            if abs(raw_diff) < min_move_thresh and abs(raw_diff) > 0.01:
+                target_val = m['existing_balance_usd'] # Keep existing
+                net_move = 0.0
+                skipped_count += 1
+            else:
+                target_val = raw_target # Accept optimizer suggestion
+                net_move = raw_diff
+
+            # 3. Calculate metrics based on the FINAL target_val (after filtering)
             new_apy = opt.simulate_apy(m, target_val)
             new_annual_interest += (target_val * new_apy)
-            net_move = target_val - m['existing_balance_usd']
+            
             action = "🟢 DEPOSIT" if net_move > 0.01 else ("🔴 WITHDRAW" if net_move < -0.01 else "⚪ HOLD")
             
             results.append({
@@ -676,6 +699,10 @@ if not df_selected.empty:
                 "New APY": new_apy,
                 "Annual $ Yield": target_val * new_apy,
             })
+        
+        # 4. Insert Alert if logic triggered
+        if skipped_count > 0:
+            st.warning(f"⚠️ Filter Active: {skipped_count} suggested moves were suppressed because they were less than ${min_move_thresh}. These are marked as 'HOLD'.")
         
         df_res = pd.DataFrame(results)
         
