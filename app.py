@@ -312,28 +312,34 @@ for c in cols_to_num:
 st.subheader("1. Market Discovery")
 st.caption("Use the filters below to narrow down markets, then copy Market IDs for optimization.")
 
-# Prepare Token Display names
-def get_tokens(df, col):
-    items = []
-    for _, r in df.iterrows():
-        name = str(r[col])
-        mid = str(r['Market ID'])[:6]
-        disp = f"{name} ({mid})" if name and name != "nan" else f"({mid})"
-        items.append({'disp': disp, 'id': r['Market ID']})
-    return items
+# --- DATA INDEXING ---
+if "market_dict" not in st.session_state:
+    st.session_state.market_dict = get_market_dictionary()
 
-loan_tokens = get_tokens(df_all, 'Loan Token')
-collateral_tokens = get_tokens(df_all, 'Collateral')
-unique_loan_disp = sorted(list(set(x['disp'] for x in loan_tokens)))
-unique_coll_disp = sorted(list(set(x['disp'] for x in collateral_tokens)))
+df_all = st.session_state.market_dict.copy()
+cols_to_num = ['Supply APY', 'Utilization', 'Available Liquidity (USD)', 'Total Supply (USD)', 'Total Borrow (USD)']
+for c in cols_to_num:
+    df_all[c] = pd.to_numeric(df_all[c], errors='coerce').fillna(0.0)
+
+st.subheader("1. Market Discovery")
+st.caption("Use the filters below to narrow down markets, then copy Market IDs for optimization.")
+
+# Simplified token helper: returns sorted list of unique symbols
+def get_tokens(df, col):
+    print(f"[Execution] Extracting unique symbols for column: {col}")
+    unique_symbols = df[col].dropna().unique()
+    return sorted([str(s) for s in unique_symbols if str(s).lower() != 'nan'])
+
+loan_symbols = get_tokens(df_all, 'Loan Token')
+collateral_symbols = get_tokens(df_all, 'Collateral')
 unique_chains = sorted(df_all['Chain'].dropna().unique().tolist())
 
 # --- FILTER FORM ---
 with st.form("market_filter_form"):
     f_col1, f_col2, f_col3 = st.columns(3)
     with f_col1: sel_chains = st.multiselect("Chains", options=unique_chains)
-    with f_col2: sel_loans = st.multiselect("Loan Tokens", options=unique_loan_disp)
-    with f_col3: sel_colls = st.multiselect("Collateral Tokens", options=unique_coll_disp)
+    with f_col2: sel_loans = st.multiselect("Loan Tokens", options=loan_symbols)
+    with f_col3: sel_colls = st.multiselect("Collateral Tokens", options=collateral_symbols)
     show_whitelisted = st.checkbox("Whitelisted?", value=False)
     st.markdown("---")
     r1_c1, r1_c2 = st.columns(2)
@@ -345,14 +351,19 @@ with st.form("market_filter_form"):
 
 # --- FILTER APPLICATION ---
 df_filtered = df_all.copy()
-if sel_chains: df_filtered = df_filtered[df_filtered['Chain'].isin(sel_chains)]
+if sel_chains: 
+    df_filtered = df_filtered[df_filtered['Chain'].isin(sel_chains)]
+    
 if sel_loans:
-    target_ids = [x['id'] for x in loan_tokens if x['disp'] in sel_loans]
-    df_filtered = df_filtered[df_filtered['Market ID'].isin(target_ids)]
+    print(f"[Execution] Filtering for Loan Tokens: {sel_loans}")
+    df_filtered = df_filtered[df_filtered['Loan Token'].isin(sel_loans)]
+    
 if sel_colls:
-    target_ids = [x['id'] for x in collateral_tokens if x['disp'] in sel_colls]
-    df_filtered = df_filtered[df_filtered['Market ID'].isin(target_ids)]
-if show_whitelisted: df_filtered = df_filtered[df_filtered['Whitelisted'] == True]
+    print(f"[Execution] Filtering for Collateral Tokens: {sel_colls}")
+    df_filtered = df_filtered[df_filtered['Collateral'].isin(sel_colls)]
+
+if show_whitelisted: 
+    df_filtered = df_filtered[df_filtered['Whitelisted'] == True]
 
 df_filtered = df_filtered[
     (df_filtered['Supply APY'] >= (m_apy_in / 100.0)) & 
