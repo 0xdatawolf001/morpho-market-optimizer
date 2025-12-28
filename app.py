@@ -164,53 +164,39 @@ def fetch_live_market_details(selected_df):
 # ==========================================
 
 class RebalanceOptimizer:
-    def __init__(self, total_budget, market_list, hurdle_rate_pct, status_placeholder=None):
+    def __init__(self, total_budget, market_list, hurdle_rate_pct):
         self.total_budget = total_budget 
         self.markets = market_list
         self.hurdle_rate = hurdle_rate_pct / 100.0
-        self.status_placeholder = status_placeholder
         
         # Tracking history for charts
         self.yield_trace = []    
         self.frontier_trace = [] 
-        self.car_trace = []      # Renamed from tangency
-        self.all_attempts = []   # All evaluated points for scatter
+        self.car_trace = []      
+        self.all_attempts = []   
         
         # Current Optimization Context
         self.current_phase = "Initializing"
         self.start_time = time.time()
 
     def simulate_apy(self, market, user_new_alloc_usd):
-        # 1. SHORT-CIRCUIT: If the change is negligible (less than 1 micro-cent), 
-        # return the current APY. This prevents phantom interest fluctuations.
         change_threshold = 1e-15 
         if abs(user_new_alloc_usd - market['existing_balance_usd']) < change_threshold:
             return market['current_supply_apy']
         
-        # 2. CONVERT TO WEI: Calculate user's existing and new allocation
-        # Use round() to avoid float noise (e.g., 0.9999999999999999 -> 1.0)
         multiplier = 10**market['Decimals']
         user_existing_wei = market['existing_balance_usd'] * multiplier
         user_new_wei = user_new_alloc_usd * multiplier
         
-        # 3. CALCULATE OTHER USERS: Extract everyone else's money from the pool
-        # We subtract the user's specific contribution from the raw total
         other_users_supply_wei = max(0, market['raw_supply'] - user_existing_wei)
-        
-        # 4. SIMULATE TOTAL: Add the NEW allocation back to the pool
         simulated_total_supply_wei = other_users_supply_wei + user_new_wei
         
         if simulated_total_supply_wei <= 0: 
             return 0.0
         
-        # 5. CALCULATE UTILIZATION: Borrow / Supply
         new_util = market['raw_borrow'] / simulated_total_supply_wei
-        
-        # 6. APPLY MORPHO CURVE LOGIC
         new_mult = compute_curve_multiplier(new_util)
         new_borrow_rate = market['rate_at_target'] * new_mult
-        
-        # 7. FINAL APY: Supply Rate = Borrow Rate * Utilization * (1 - Fee)
         new_supply_rate = new_borrow_rate * new_util * (1 - market['fee'])
         
         return rate_per_second_to_apy(new_supply_rate)
@@ -221,29 +207,23 @@ class RebalanceOptimizer:
         return x * (self.total_budget / sum_x)
 
     def _calculate_metrics(self, x):
-        """Helper to calculate Yield, Diversity, and CAR for any given allocation"""
         normalized_x = self._get_normalized_allocations(x)
         weights = normalized_x / self.total_budget if self.total_budget > 0 else np.zeros_like(x)
         
-        # 1. Total Yield ($)
         total_yield = 0
         for i, alloc in enumerate(normalized_x):
             total_yield += (alloc * self.simulate_apy(self.markets[i], alloc))
             
-        # 2. Diversity (1 - HHI)
         hhi = np.sum(weights**2)
         diversity = 1.0 - hhi
         
-        # 3. Concentration Adjusted Return (Excess Return / Concentration)
         hurdle_cost = self.total_budget * self.hurdle_rate
         excess_return = total_yield - hurdle_cost
-        # Add small epsilon to HHI to avoid division by zero
         car_score = excess_return / (hhi + 1e-9)
         
         return normalized_x, total_yield, diversity, car_score
 
     def _record_attempt(self, total_yield, diversity):
-        """Log data points for the scatter plot"""
         self.all_attempts.append({
             "Annual Yield ($)": total_yield,
             "Blended APY": total_yield / self.total_budget if self.total_budget > 0 else 0,
@@ -251,50 +231,23 @@ class RebalanceOptimizer:
             "Type": "Explored" 
         })
 
-    # --- OBJECTIVE FUNCTIONS ---
-
     def objective_yield(self, x):
         norm_x, y_val, div_val, car_val = self._calculate_metrics(x)
         self._record_attempt(y_val, div_val)
-        return -y_val # Minimize negative yield (Maximize Yield)
+        self.yield_trace.append(y_val)
+        return -y_val
 
     def objective_frontier(self, x):
         norm_x, y_val, div_val, car_val = self._calculate_metrics(x)
         self._record_attempt(y_val, div_val)
-        # Maximize (Yield * Diversity)
+        self.frontier_trace.append(y_val)
         return -(y_val * div_val) 
 
     def objective_car(self, x):
         norm_x, y_val, div_val, car_val = self._calculate_metrics(x)
         self._record_attempt(y_val, div_val)
-        # Maximize (Excess Return / Concentration)
+        self.car_trace.append(y_val)
         return -car_val
-
-    def callback(self, xk, convergence):
-        # Called after each iteration of the solver
-        if self.status_placeholder:
-            elapsed = time.time() - self.start_time
-            
-            # Get current metrics for the best candidate in this generation
-            _, y, d, c = self._calculate_metrics(xk)
-            
-            # Update traces based on phase
-            if self.current_phase == "Max Yield":
-                self.yield_trace.append(y)
-            elif self.current_phase == "Frontier":
-                self.frontier_trace.append(y)
-            elif self.current_phase == "Concentration-Adj":
-                self.car_trace.append(y)
-
-            self.status_placeholder.markdown(
-                f"""
-                **⚙️ Optimizing: {self.current_phase}...**
-                - Evaluated Portfolios: `{len(self.all_attempts)}`
-                - Current Best Yield ($): `${y:,.2f}`
-                - Diversity Score: `{d:.3f}`
-                - Time Elapsed: `{elapsed:.1f}s`
-                """
-            )
 
     def optimize(self):
         n = len(self.markets)
@@ -302,50 +255,41 @@ class RebalanceOptimizer:
         
         bounds = [(0, self.total_budget)] * n
         
-        # --- Common Init Strategy ---
-        # Add initial guesses (corners) to help it find edges
         init_pop = []
         for i in range(min(n, 50)):
             g = np.zeros(n)
             g[i] = self.total_budget
             init_pop.append(g)
-        # Add balanced guess
         init_pop.append(np.ones(n) * (self.total_budget/n))
         init = np.array(init_pop) if len(init_pop) >= 5 else None
 
-        # --- RUN 1: MAX YIELD ---
         self.current_phase = "Max Yield"
         res_yield = differential_evolution(
             self.objective_yield, bounds, strategy='best1bin',
-            maxiter=2000, popsize=10, tol=0.01,
+            maxiter=100000, popsize=10, tol=0.01,
             init=init if init is not None and init.shape[0] >= 5 else 'latinhypercube',
-            mutation=(0.5, 1), recombination=0.7, callback=self.callback
+            mutation=(0.5, 1), recombination=0.7
         )
         best_yield_alloc = self._get_normalized_allocations(res_yield.x)
 
-        # --- RUN 2: FRONTIER (Yield * Diversity) ---
         self.current_phase = "Frontier"
         res_frontier = differential_evolution(
             self.objective_frontier, bounds, strategy='best1bin',
-            maxiter=2000, popsize=10, tol=0.01,
+            maxiter=100000, popsize=10, tol=0.01,
             init=init if init is not None and init.shape[0] >= 5 else 'latinhypercube',
-            mutation=(0.5, 1), recombination=0.7, callback=self.callback
+            mutation=(0.5, 1), recombination=0.7
         )
         best_frontier_alloc = self._get_normalized_allocations(res_frontier.x)
 
-        # --- RUN 3: CONCENTRATION ADJUSTED RETURN ---
         self.current_phase = "Concentration-Adj"
         res_car = differential_evolution(
             self.objective_car, bounds, strategy='best1bin',
-            maxiter=10000, popsize=10, tol=0.01,
+            maxiter=100000, popsize=10, tol=0.01,
             init=init if init is not None and init.shape[0] >= 5 else 'latinhypercube',
-            mutation=(0.5, 1), recombination=0.7, callback=self.callback
+            mutation=(0.5, 1), recombination=0.7
         )
         best_car_alloc = self._get_normalized_allocations(res_car.x)
         
-        self.status_placeholder.success(f"✅ Optimization Complete! ({len(self.all_attempts)} scenarios analyzed)")
-
-        # Return all 3 portfolios
         return best_yield_alloc, best_frontier_alloc, best_car_alloc
 
 # ==========================================
@@ -507,20 +451,19 @@ if not df_selected.empty:
         current_annual_interest = sum(m['existing_balance_usd'] * m['current_supply_apy'] for m in market_data_list)
         current_blended_apy = current_annual_interest / current_wealth if current_wealth > 0 else 0.0
 
-        # Run Optimizer
-        status_container = st.empty()
-        opt = RebalanceOptimizer(total_optimizable, market_data_list, hurdle_rate, status_container)
+        # Run Optimizer (Status placeholder logic removed)
+        opt = RebalanceOptimizer(total_optimizable, market_data_list, hurdle_rate)
         
         # RETURNS 3 DISTINCT SOLVED PORTFOLIOS
         best_yield_alloc, frontier_alloc, car_alloc = opt.optimize()
         
-    # Save results to session state to prevent reset on interaction
+        # Save results to session state to prevent reset on interaction
         st.session_state['opt_results'] = {
             'market_data_list': market_data_list,
             'opt_object': opt,
             'best_yield_alloc': best_yield_alloc,
             'frontier_alloc': frontier_alloc,
-            'car_alloc': car_alloc,  # Ensure this key matches exactly
+            'car_alloc': car_alloc,
             'current_metrics': {
                 'annual_interest': current_annual_interest,
                 'blended_apy': current_blended_apy
