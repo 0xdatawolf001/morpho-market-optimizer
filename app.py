@@ -662,22 +662,44 @@ if not df_selected.empty:
         current_ann = res_data['current_metrics']['annual_interest']
         new_blended_apy = new_annual_interest / total_optimizable if total_optimizable > 0 else 0.0
         
-        # 1. Financial Summary Metrics
+        # --- 1. Financial Summary Metrics (RESTORED) ---
         st.subheader("Optimization Summary")
+
+        # Calculate differences for deltas
+        apy_diff = new_blended_apy - current_blended
+        interest_diff = new_annual_interest - current_ann
 
         # Calculate Diversity for the currently selected strategy
         selected_weights = final_alloc / total_optimizable if total_optimizable > 0 else np.zeros_like(final_alloc)
         selected_diversity = 1.0 - np.sum(selected_weights**2)
 
-        m1, m2, m3, m4 = st.columns(4) 
-        m1.metric("Current APY", f"{current_blended:.4%}")
-        m2.metric("Optimized APY", f"{new_blended_apy:.4%}", delta=f"{(new_blended_apy-current_blended)*100:.3f}%")
-        m3.metric("Total Annual Interest", f"${new_annual_interest:,.2f}", delta=f"${new_annual_interest-current_ann:,.2f}")
-        m4.metric(
-            "Diversity Index", 
-            f"{selected_diversity:.4f}", 
-            help="1.0 is perfectly diversified, closer to 0 is concentrated. Calculated as (1 - HHI)."
+        m1, m2, m3, m4, m5 = st.columns(5) 
+        m1.metric(
+            "Current APY", 
+            f"{current_blended:.4%}",
+            help="Weighted APY of existing balances only"
         )
+        m2.metric(
+            "Optimized APY", 
+            f"{new_blended_apy:.4%}", 
+            delta=f"{apy_diff*100:.3f}%",
+            help="Projected APY after rebalancing/deploying capital"
+        )
+        m3.metric("Total Wealth", f"${total_optimizable:,.2f}")
+        m4.metric(
+            "Total Wealth (1 Yr)", 
+            f"${total_optimizable + new_annual_interest:,.2f}",
+            help="Principal plus projected annual interest"
+        )
+        m5.metric(
+            "Additional Gain", 
+            f"${interest_diff:,.2f}",
+            delta_color="normal",
+            help="Extra annual interest earned compared to current setup"
+        )
+        
+        # Diversity metric placed below or in a separate row if preferred
+        st.caption(f"**Diversity Index:** {selected_diversity:.4f} (1.0 is perfectly diversified, closer to 0 is concentrated)")
         
         # 2. Detailed Interest Breakdown
         st.write("---")
