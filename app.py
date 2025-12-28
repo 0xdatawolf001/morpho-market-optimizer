@@ -170,24 +170,14 @@ class RebalanceOptimizer:
         self.hurdle_rate = hurdle_rate_pct / 100.0
         self.status_placeholder = status_placeholder
         
-        # Tracking history
-        self.yield_trace = []    # Best pure yield per iteration
-        self.frontier_trace = [] # Best frontier per iteration
-        self.tangency_trace = [] # Best tangency per iteration
+        # Tracking history for charts
+        self.yield_trace = []    
+        self.frontier_trace = [] 
+        self.car_trace = []      # Renamed from tangency
         self.all_attempts = []   # All evaluated points for scatter
         
-        # Tracking Best Candidates
-        self.best_yield_val = -1.0
-        self.best_yield_alloc = None
-        
-        self.best_frontier_score = -1.0
-        self.best_frontier_alloc = None
-        self.best_frontier_yield_val = 0.0
-
-        self.best_tangency_score = -999.0
-        self.best_tangency_alloc = None
-        self.best_tangency_yield_val = 0.0
-
+        # Current Optimization Context
+        self.current_phase = "Initializing"
         self.start_time = time.time()
 
     def simulate_apy(self, market, user_new_alloc_usd):
@@ -210,89 +200,89 @@ class RebalanceOptimizer:
         if sum_x == 0: return x 
         return x * (self.total_budget / sum_x)
 
-    def objective(self, x):
+    def _calculate_metrics(self, x):
+        """Helper to calculate Yield, Diversity, and CAR for any given allocation"""
         normalized_x = self._get_normalized_allocations(x)
-        total_yield = 0
         weights = normalized_x / self.total_budget if self.total_budget > 0 else np.zeros_like(x)
         
-        # Calculate yield
+        # 1. Total Yield ($)
+        total_yield = 0
         for i, alloc in enumerate(normalized_x):
             total_yield += (alloc * self.simulate_apy(self.markets[i], alloc))
-        
-        # Calculate Diversity Metrics
-        # HHI = Sum of squared weights. Range 1/N (diverse) to 1 (concentrated).
-        # We treat HHI as "Risk".
+            
+        # 2. Diversity (1 - HHI)
         hhi = np.sum(weights**2)
         diversity = 1.0 - hhi
         
-        # 1. Frontier Score: High Yield + High Diversity
-        frontier_score = total_yield * diversity 
-
-        # 2. Tangency Score: (Return - Hurdle) / Risk(HHI)
-        # We want to maximize excess return per unit of concentration risk
+        # 3. Concentration Adjusted Return (Excess Return / Concentration)
         hurdle_cost = self.total_budget * self.hurdle_rate
         excess_return = total_yield - hurdle_cost
         # Add small epsilon to HHI to avoid division by zero
-        tangency_score = excess_return / (hhi + 1e-9)
-
-        # --- Track Global Bests ---
+        car_score = excess_return / (hhi + 1e-9)
         
-        # A. Absolute Best Yield
-        if total_yield > self.best_yield_val:
-            self.best_yield_val = total_yield
-            self.best_yield_alloc = normalized_x
+        return normalized_x, total_yield, diversity, car_score
 
-        # B. Best Frontier (Yield * Diversity)
-        if frontier_score > self.best_frontier_score:
-            self.best_frontier_score = frontier_score
-            self.best_frontier_alloc = normalized_x
-            self.best_frontier_yield_val = total_yield
-            
-        # C. Best Tangency (Sharpe-like)
-        if tangency_score > self.best_tangency_score:
-            self.best_tangency_score = tangency_score
-            self.best_tangency_alloc = normalized_x
-            self.best_tangency_yield_val = total_yield
-
-        # Record attempt for Scatter Plot
+    def _record_attempt(self, total_yield, diversity):
+        """Log data points for the scatter plot"""
         self.all_attempts.append({
             "Annual Yield ($)": total_yield,
             "Blended APY": total_yield / self.total_budget if self.total_budget > 0 else 0,
             "Diversity Score": diversity,
             "Type": "Explored" 
         })
-        
-        return -total_yield
+
+    # --- OBJECTIVE FUNCTIONS ---
+
+    def objective_yield(self, x):
+        norm_x, y_val, div_val, car_val = self._calculate_metrics(x)
+        self._record_attempt(y_val, div_val)
+        return -y_val # Minimize negative yield (Maximize Yield)
+
+    def objective_frontier(self, x):
+        norm_x, y_val, div_val, car_val = self._calculate_metrics(x)
+        self._record_attempt(y_val, div_val)
+        # Maximize (Yield * Diversity)
+        return -(y_val * div_val) 
+
+    def objective_car(self, x):
+        norm_x, y_val, div_val, car_val = self._calculate_metrics(x)
+        self._record_attempt(y_val, div_val)
+        # Maximize (Excess Return / Concentration)
+        return -car_val
 
     def callback(self, xk, convergence):
-        # Called after each iteration (population evolution)
+        # Called after each iteration of the solver
         if self.status_placeholder:
             elapsed = time.time() - self.start_time
             
-            # Record current bests for the line chart
-            self.yield_trace.append(self.best_yield_val)
-            self.frontier_trace.append(self.best_frontier_yield_val)
-            self.tangency_trace.append(self.best_tangency_yield_val)
+            # Get current metrics for the best candidate in this generation
+            _, y, d, c = self._calculate_metrics(xk)
+            
+            # Update traces based on phase
+            if self.current_phase == "Max Yield":
+                self.yield_trace.append(y)
+            elif self.current_phase == "Frontier":
+                self.frontier_trace.append(y)
+            elif self.current_phase == "Concentration-Adj":
+                self.car_trace.append(y)
 
             self.status_placeholder.markdown(
                 f"""
-                **⚡ Exploring Optimization Space...**
+                **⚙️ Optimizing: {self.current_phase}...**
                 - Evaluated Portfolios: `{len(self.all_attempts)}`
-                - Iteration: `{len(self.yield_trace)}`
-                - Best APY Found: `{ (self.best_yield_val/self.total_budget):.4%}`
-                - Elapsed: `{elapsed:.1f}s`
+                - Current Best Yield ($): `${y:,.2f}`
+                - Diversity Score: `{d:.3f}`
+                - Time Elapsed: `{elapsed:.1f}s`
                 """
             )
 
     def optimize(self):
         n = len(self.markets)
         if n == 0: return None, None, None
-        bounds = [(0, self.total_budget)] * n
-        self.yield_trace = []
-        self.frontier_trace = []
-        self.tangency_trace = []
-        self.all_attempts = []
         
+        bounds = [(0, self.total_budget)] * n
+        
+        # --- Common Init Strategy ---
         # Add initial guesses (corners) to help it find edges
         init_pop = []
         for i in range(min(n, 50)):
@@ -301,18 +291,42 @@ class RebalanceOptimizer:
             init_pop.append(g)
         # Add balanced guess
         init_pop.append(np.ones(n) * (self.total_budget/n))
-        
         init = np.array(init_pop) if len(init_pop) >= 5 else None
 
-        res = differential_evolution(
-            self.objective, bounds, strategy='best1bin',
-            maxiter=10000, popsize=15, tol=0.01,
+        # --- RUN 1: MAX YIELD ---
+        self.current_phase = "Max Yield"
+        res_yield = differential_evolution(
+            self.objective_yield, bounds, strategy='best1bin',
+            maxiter=2000, popsize=10, tol=0.01,
             init=init if init is not None and init.shape[0] >= 5 else 'latinhypercube',
-            mutation=(0.5, 1), recombination=0.7,
-            callback=self.callback
+            mutation=(0.5, 1), recombination=0.7, callback=self.callback
         )
+        best_yield_alloc = self._get_normalized_allocations(res_yield.x)
+
+        # --- RUN 2: FRONTIER (Yield * Diversity) ---
+        self.current_phase = "Frontier"
+        res_frontier = differential_evolution(
+            self.objective_frontier, bounds, strategy='best1bin',
+            maxiter=2000, popsize=10, tol=0.01,
+            init=init if init is not None and init.shape[0] >= 5 else 'latinhypercube',
+            mutation=(0.5, 1), recombination=0.7, callback=self.callback
+        )
+        best_frontier_alloc = self._get_normalized_allocations(res_frontier.x)
+
+        # --- RUN 3: CONCENTRATION ADJUSTED RETURN ---
+        self.current_phase = "Concentration-Adj"
+        res_car = differential_evolution(
+            self.objective_car, bounds, strategy='best1bin',
+            maxiter=10000, popsize=10, tol=0.01,
+            init=init if init is not None and init.shape[0] >= 5 else 'latinhypercube',
+            mutation=(0.5, 1), recombination=0.7, callback=self.callback
+        )
+        best_car_alloc = self._get_normalized_allocations(res_car.x)
+        
+        self.status_placeholder.success(f"✅ Optimization Complete! ({len(self.all_attempts)} scenarios analyzed)")
+
         # Return all 3 portfolios
-        return self.best_yield_alloc, self.best_frontier_alloc, self.best_tangency_alloc
+        return best_yield_alloc, best_frontier_alloc, best_car_alloc
 
 # ==========================================
 # 4. STREAMLIT UI
@@ -412,12 +426,12 @@ with col_param:
     st.subheader("3. Parameters")
     new_cash = st.number_input("Additional New Cash (USD)", value=0.0, step=1000.0)
     # Hurdle Rate Box
-    st.markdown("**Tangency Portfolio Setting**")
+    st.markdown("**Concentration-Adj Setting**")
     hurdle_rate = st.number_input(
         "Hurdle Rate (Risk Free %)", 
-        min_value=0.0, max_value=100.0, 
+        # min_value=0.0, max_value=100.0, 
         value=DEFAULT_HURDLE_RATE, step=0.1,
-        help="Used to calculate the Tangency Portfolio (Excess Return / Concentration Risk)"
+        help="Used to calculate the Concentration-Adjusted Return. Represents the cost of capital."
     )
 
 if not df_selected.empty:
@@ -455,13 +469,13 @@ if not df_selected.empty:
         col_info1, col_info2, col_info3 = st.columns(3)
         with col_info1:
             st.markdown("**🔴 Best Yield**")
-            st.caption("Prioritizes raw APY above all else. May result in high concentration in a single market.")
+            st.caption("Purely prioritizes raw APY. Finds the mathematical maximum yield, often resulting in 100% allocation to the single highest payer.")
         with col_info2:
-            st.markdown("**🟣 Tangency**")
-            st.caption("Maximizes Excess Return per unit of Concentration Risk. Uses your 'Hurdle Rate' (like AAVE's rate, ETH staking rate, a rate you are benchmarking against) or risk-free benchmark. This is the same as a Frontier Portfolio but adjusted with a required rate of return")
+            st.markdown("**🟣 Concentration-Adj Return**")
+            st.caption("Maximizes `(Yield - Hurdle) / Concentration`. This penalizes high concentration (HHI) unless the excess return is massive.")
         with col_info3:
             st.markdown("**🌸 Frontier (Diversified)**")
-            st.caption("Balances Yield and Diversity (HHI). Seeks the highest yield possible while maintaining a distributed allocation.")
+            st.caption("Maximizes `Yield * Diversity`. Finds the sweet spot where you get good yield without putting all eggs in one basket.")
 
     # --- BUTTON TO RUN AND SAVE TO STATE ---
     if st.button("🚀 Run Optimization", type="primary", width='stretch'):
@@ -476,16 +490,17 @@ if not df_selected.empty:
         # Run Optimizer
         status_container = st.empty()
         opt = RebalanceOptimizer(total_optimizable, market_data_list, hurdle_rate, status_container)
-        best_yield_alloc, frontier_alloc, tangency_alloc = opt.optimize()
-        status_container.empty()
-
-        # Save results to session state to prevent reset on interaction
+        
+        # RETURNS 3 DISTINCT SOLVED PORTFOLIOS
+        best_yield_alloc, frontier_alloc, car_alloc = opt.optimize()
+        
+    # Save results to session state to prevent reset on interaction
         st.session_state['opt_results'] = {
             'market_data_list': market_data_list,
             'opt_object': opt,
             'best_yield_alloc': best_yield_alloc,
             'frontier_alloc': frontier_alloc,
-            'tangency_alloc': tangency_alloc,
+            'car_alloc': car_alloc,  # Ensure this key matches exactly
             'current_metrics': {
                 'annual_interest': current_annual_interest,
                 'blended_apy': current_blended_apy
@@ -493,7 +508,7 @@ if not df_selected.empty:
             'traces': {
                 'yield': opt.yield_trace,
                 'frontier': opt.frontier_trace,
-                'tangency': opt.tangency_trace
+                'car': opt.car_trace
             },
             'attempts': opt.all_attempts
         }
@@ -509,7 +524,7 @@ if not df_selected.empty:
         market_data_list = res_data['market_data_list']
         best_yield_alloc = res_data['best_yield_alloc']
         frontier_alloc = res_data['frontier_alloc']
-        tangency_alloc = res_data['tangency_alloc']
+        car_alloc = res_data['car_alloc']
         
         # Helper to calc point stats for chart
         def get_stats(alloc):
@@ -522,15 +537,15 @@ if not df_selected.empty:
 
         y_abs, y_apy, y_div = get_stats(best_yield_alloc)
         f_abs, f_apy, f_div = get_stats(frontier_alloc)
-        t_abs, t_apy, t_div = get_stats(tangency_alloc)
+        c_abs, c_apy, c_div = get_stats(car_alloc)
 
         # Prepare Scatter Data
         df_scatter = pd.DataFrame(res_data['attempts'])
         
         highlights = pd.DataFrame([
             {"Diversity Score": y_div, "Blended APY": y_apy, "Type": "Best Yield", "Size": 100, "Color": "#F44336"},
-            {"Diversity Score": f_div, "Blended APY": f_apy, "Type": "Frontier (Div)", "Size": 100, "Color": "#E040FB"}, # Magenta
-            {"Diversity Score": t_div, "Blended APY": t_apy, "Type": "Tangency", "Size": 100, "Color": "#7C4DFF"}       # Purple
+            {"Diversity Score": f_div, "Blended APY": f_apy, "Type": "Frontier", "Size": 100, "Color": "#E040FB"}, # Magenta
+            {"Diversity Score": c_div, "Blended APY": c_apy, "Type": "Concentration-Adj", "Size": 100, "Color": "#7C4DFF"} # Purple
         ])
         
         # --- CHART SECTION ---
@@ -551,36 +566,34 @@ if not df_selected.empty:
                 x='Diversity Score',
                 y='Blended APY',
                 color=alt.Color('Type', scale=alt.Scale(
-                    domain=['Best Yield', 'Frontier (Div)', 'Tangency'],
-                    range=['#F44336', '#E040FB', '#7C4DFF'] # Red, Magenta, Purple
+                    domain=['Best Yield', 'Frontier', 'Concentration-Adj'],
+                    range=['#F44336', '#E040FB', '#7C4DFF'] 
                 )),
                 tooltip=['Type', 'Blended APY', 'Diversity Score']
             )
             
             st.altair_chart(base + points, width='stretch')
-            st.caption("Red: Max Yield. Magenta: Max Diversity. Purple: Tangency (Risk Adjusted).")
+            st.caption("Purple Point represents the best Risk-Adjusted return based on Concentration.")
 
         # 2. LINE CHART (CONVERGENCE)
         with col_graph2:
-            st.markdown("**Yield Convergence**")
+            st.markdown("**Solver Convergence**")
             
+            # Since we now run 3 separate loops, the traces might be different lengths
+            # We will plot them as independent lines
             traces = res_data['traces']
-            df_hist = pd.DataFrame({
-                "Iteration": range(len(traces['yield'])),
-                "Best Yield ($)": traces['yield'],
-                "Frontier Yield ($)": traces['frontier'],
-                "Tangency Yield ($)": traces['tangency']
-            })
             
-            df_hist_long = df_hist.melt('Iteration', var_name='Strategy', value_name='Yield')
+            # Create separate DFs and concat
+            d1 = pd.DataFrame({"Iteration": range(len(traces['yield'])), "Value": traces['yield'], "Strategy": "Yield Run"})
+            d2 = pd.DataFrame({"Iteration": range(len(traces['frontier'])), "Value": traces['frontier'], "Strategy": "Frontier Run"})
+            d3 = pd.DataFrame({"Iteration": range(len(traces['car'])), "Value": traces['car'], "Strategy": "Conc-Adj Run"})
+            
+            df_hist_long = pd.concat([d1, d2, d3])
             
             line_chart = alt.Chart(df_hist_long).mark_line().encode(
                 x='Iteration',
-                y='Yield',
-                color=alt.Color('Strategy', scale=alt.Scale(
-                    domain=['Best Yield ($)', 'Frontier Yield ($)', 'Tangency Yield ($)'],
-                    range=['#F44336', '#E040FB', '#7C4DFF']
-                ))
+                y=alt.Y('Value', title='Objective Yield ($)'),
+                color=alt.Color('Strategy', scale=alt.Scale(range=['#F44336', '#E040FB', '#7C4DFF']))
             )
             st.altair_chart(line_chart, width='stretch')
 
@@ -594,7 +607,7 @@ if not df_selected.empty:
             m_name = f"{m['Loan Token']}/{m['Collateral']}"
             bar_data.append({"Market": m_name, "Strategy": "Best Yield", "Alloc ($)": best_yield_alloc[idx]})
             bar_data.append({"Market": m_name, "Strategy": "Frontier", "Alloc ($)": frontier_alloc[idx]})
-            bar_data.append({"Market": m_name, "Strategy": "Tangency", "Alloc ($)": tangency_alloc[idx]})
+            bar_data.append({"Market": m_name, "Strategy": "Conc-Adj", "Alloc ($)": car_alloc[idx]})
             
         df_bar = pd.DataFrame(bar_data)
         
@@ -602,7 +615,7 @@ if not df_selected.empty:
             x=alt.X('Strategy', axis=None),
             y=alt.Y('Alloc ($)', axis=alt.Axis(title='Allocation USD')),
             color=alt.Color('Strategy', scale=alt.Scale(
-                domain=['Best Yield', 'Frontier', 'Tangency'],
+                domain=['Best Yield', 'Frontier', 'Conc-Adj'],
                 range=['#F44336', '#E040FB', '#7C4DFF']
             )),
             column=alt.Column('Market', header=alt.Header(titleOrient="bottom", labelOrient="bottom")),
@@ -616,10 +629,9 @@ if not df_selected.empty:
         
         st.subheader("🔍 Results")
 
-        # This Radio button only toggles the Table View, not the charts
         strategy_choice = st.radio(
             "View Details For:",
-            ["Best Yield (Red)", "Frontier / Diversified (Magenta)", "Tangency (Purple)"],
+            ["Best Yield (Red)", "Frontier / Diversified (Magenta)", "Concentration-Adj (Purple)"],
             horizontal=True
         )
         
@@ -628,7 +640,7 @@ if not df_selected.empty:
         elif "Frontier" in strategy_choice:
             final_alloc = frontier_alloc
         else:
-            final_alloc = tangency_alloc
+            final_alloc = car_alloc
 
         # Calculate Final Table Details based on selection
         results = []
@@ -669,12 +681,22 @@ if not df_selected.empty:
         
         # 1. Financial Summary Metrics
         st.subheader("Optimization Summary")
-        m1, m2, m3 = st.columns(3)
+
+        # Calculate Diversity for the currently selected strategy
+        selected_weights = final_alloc / total_optimizable if total_optimizable > 0 else np.zeros_like(final_alloc)
+        selected_diversity = 1.0 - np.sum(selected_weights**2)
+
+        m1, m2, m3, m4 = st.columns(4) 
         m1.metric("Current APY", f"{current_blended:.4%}")
         m2.metric("Optimized APY", f"{new_blended_apy:.4%}", delta=f"{(new_blended_apy-current_blended)*100:.3f}%")
         m3.metric("Total Annual Interest", f"${new_annual_interest:,.2f}", delta=f"${new_annual_interest-current_ann:,.2f}")
-
-        # 2. Detailed Interest Breakdown (The missing part)
+        m4.metric(
+            "Diversity Index", 
+            f"{selected_diversity:.4f}", 
+            help="1.0 is perfectly diversified, closer to 0 is concentrated. Calculated as (1 - HHI)."
+        )
+        
+        # 2. Detailed Interest Breakdown
         st.write("---")
         r2_c1, r2_c2, r2_c3, r2_c4, r2_c5 = st.columns(5)
         r2_c1.metric("Annual", f"${new_annual_interest:,.2f}")
@@ -684,7 +706,6 @@ if not df_selected.empty:
         r2_c5.metric("Hourly", f"${new_annual_interest/8760:,.4f}")
 
         # 3. Sorted Dataframe with Column Ordering
-        # Action (🟢 > 🔴 > ⚪) then Portfolio Weight Descending
         df_res = df_res.sort_values(by=["Suggested Action", "Portfolio Weight"], ascending=[False, False])
 
         st.dataframe(
