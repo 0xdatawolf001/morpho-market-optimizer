@@ -128,7 +128,7 @@ def get_market_dictionary():
             "Available Liquidity (USD)": available_liquidity,
             "Whitelisted": m.get('whitelisted', False)
         })
-    return pd.DataFrame(processed)
+    return pd.DataFrame(processed).drop_duplicates(subset=["Market ID"], keep=False)
 
 def fetch_live_market_details(selected_df):
     details = []
@@ -389,13 +389,15 @@ with col_scope:
 with col_param:
     st.subheader("3. Parameters")
     new_cash = st.number_input("Additional New Cash (USD)", value=0.0, step=1000.0)
-    # Hurdle Rate Box
+    # Hurdle Rate Box - Updated to allow negative values
     st.markdown("**Concentration-Adj Setting**")
     hurdle_rate = st.number_input(
         "Hurdle Rate (Risk Free %)", 
-        # min_value=0.0, max_value=100.0, 
-        value=DEFAULT_HURDLE_RATE, step=0.1,
-        help="Used to calculate the Concentration-Adjusted Return. Represents the cost of capital."
+        min_value=-100.0, # Now allows negative values down to -100%
+        max_value=100.0, 
+        value=DEFAULT_HURDLE_RATE, 
+        step=0.1,
+        help="Used to calculate the Concentration-Adjusted Return. A negative rate acts as a yield bonus/subsidy."
     )
 
 if not df_selected.empty:
