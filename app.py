@@ -372,7 +372,18 @@ df_filtered = df_filtered[
     (df_filtered['Utilization'] <= x_util_in)
 ]
 
-st.dataframe(df_filtered, width='stretch', hide_index=True)
+st.dataframe(
+    df_filtered, 
+    column_config={
+        "Total Supply (USD)": st.column_config.NumberColumn(format="dollar"),
+        "Total Borrow (USD)": st.column_config.NumberColumn(format="dollar"), 
+        "Available Liquidity (USD)": st.column_config.NumberColumn(format="dollar"),
+        "Supply APY": st.column_config.NumberColumn(format="percent"),  
+        "Utilization": st.column_config.NumberColumn(format="percent"), 
+    },
+    width="stretch", 
+    hide_index=True
+)
 
 st.divider()
 
