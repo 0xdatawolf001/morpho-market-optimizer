@@ -57,6 +57,27 @@ def extract_market_id_from_monarch_link(text: str) -> str:
             return parts[-1].lower()
     return text.lower()
 
+def filter_small_moves(allocations, market_data_list, threshold_usd):
+    """
+    Applies a post-optimization filter.
+    If the difference between the Optimized Target and Current Balance is less than threshold,
+    revert the allocation to the Current Balance (Effective Action: HOLD).
+    """
+    cleaned_allocations = allocations.copy()
+    
+    for i, target_val in enumerate(cleaned_allocations):
+        current_balance = market_data_list[i]['existing_balance_usd']
+        
+        # Calculate raw move size
+        diff = abs(target_val - current_balance)
+        
+        # Logic: If move is significant enough (> 0.01 cents) but below user threshold
+        # We revert the target to match the current balance exactly.
+        if diff > 0.01 and diff < threshold_usd:
+            cleaned_allocations[i] = current_balance
+            
+    return cleaned_allocations
+
 # ==========================================
 # 2. DATA FETCHING
 # ==========================================
@@ -315,15 +336,6 @@ for c in cols_to_num:
 st.subheader("1. Market Discovery")
 st.caption("Use the filters below to narrow down markets, then copy Market IDs for optimization.")
 
-# --- DATA INDEXING ---
-if "market_dict" not in st.session_state:
-    st.session_state.market_dict = get_market_dictionary()
-
-df_all = st.session_state.market_dict.copy()
-cols_to_num = ['Supply APY', 'Utilization', 'Available Liquidity (USD)', 'Total Supply (USD)', 'Total Borrow (USD)']
-for c in cols_to_num:
-    df_all[c] = pd.to_numeric(df_all[c], errors='coerce').fillna(0.0)
-
 # Simplified token helper: returns sorted list of unique symbols
 def get_tokens(df, col):
     print(f"[Execution] Extracting unique symbols for column: {col}")
@@ -414,17 +426,17 @@ with col_param:
     # Hurdle Rate Box - Updated to allow negative values
     hurdle_rate = st.number_input(
         "Concentration-Adj Setting: Hurdle Rate (Risk Free %)", 
-        min_value=-100.0, # Now allows negative values down to -100%
+        min_value=-100.0, 
         max_value=100.0, 
         value=DEFAULT_HURDLE_RATE, 
         step=0.1,
         help="Used to calculate the Concentration-Adjusted Return. A negative rate acts as a yield bonus/subsidy."
     )
 
-    # --- NEW CODE START ---
+    # Threshold for Min Move
     min_move_thresh = st.number_input(
         "Min Rebalance Threshold ($)", 
-        value=100.0, 
+        value=0.0, 
         step=50.0, 
         help="If a suggested move (deposit or withdraw) is less than this amount, the tool will recommend holding instead."
     )
@@ -482,19 +494,25 @@ if not df_selected.empty:
         current_annual_interest = sum(m['existing_balance_usd'] * m['current_supply_apy'] for m in market_data_list)
         current_blended_apy = current_annual_interest / current_wealth if current_wealth > 0 else 0.0
 
-        # Run Optimizer (Status placeholder logic removed)
+        # Run Optimizer
         opt = RebalanceOptimizer(total_optimizable, market_data_list, hurdle_rate)
         
-        # RETURNS 3 DISTINCT SOLVED PORTFOLIOS
-        best_yield_alloc, frontier_alloc, car_alloc = opt.optimize()
+        # RETURNS 3 DISTINCT SOLVED PORTFOLIOS (RAW)
+        raw_yield_alloc, raw_frontier_alloc, raw_car_alloc = opt.optimize()
+
+        # APPLY POST-OPTIMIZATION CLEANING (THRESHOLD FILTER)
+        # This ensures charts and metrics align with the table below
+        cleaned_yield_alloc = filter_small_moves(raw_yield_alloc, market_data_list, min_move_thresh)
+        cleaned_frontier_alloc = filter_small_moves(raw_frontier_alloc, market_data_list, min_move_thresh)
+        cleaned_car_alloc = filter_small_moves(raw_car_alloc, market_data_list, min_move_thresh)
         
         # Save results to session state to prevent reset on interaction
         st.session_state['opt_results'] = {
             'market_data_list': market_data_list,
             'opt_object': opt,
-            'best_yield_alloc': best_yield_alloc,
-            'frontier_alloc': frontier_alloc,
-            'car_alloc': car_alloc,
+            'best_yield_alloc': cleaned_yield_alloc,    # Using CLEANED
+            'frontier_alloc': cleaned_frontier_alloc,   # Using CLEANED
+            'car_alloc': cleaned_car_alloc,             # Using CLEANED
             'current_metrics': {
                 'annual_interest': current_annual_interest,
                 'blended_apy': current_blended_apy
@@ -656,32 +674,30 @@ if not df_selected.empty:
         else:
             final_alloc = car_alloc
 
-        # --- UPDATED LOGIC START ---
+        # --- UPDATED LOGIC (SIMPLIFIED) ---
         results = []
         new_annual_interest = 0
-        skipped_count = 0 # Track skipped small moves
         
-        for i, raw_target in enumerate(final_alloc):
+        for i, target_val in enumerate(final_alloc):
             m = market_data_list[i]
             
-            # 1. Calculate raw difference first
-            raw_diff = raw_target - m['existing_balance_usd']
+            # Calculate raw difference 
+            # Note: final_alloc is ALREADY clean (filtered), so if diff < threshold,
+            # it has already been set to 0.0 effectively in the cleaning step.
             
-            # 2. Check Threshold Logic
-            # If the move is smaller than threshold (but not effectively zero), cancel the move
-            if abs(raw_diff) < min_move_thresh and abs(raw_diff) > 0.01:
-                target_val = m['existing_balance_usd'] # Keep existing
-                net_move = 0.0
-                skipped_count += 1
-            else:
-                target_val = raw_target # Accept optimizer suggestion
-                net_move = raw_diff
-
-            # 3. Calculate metrics based on the FINAL target_val (after filtering)
+            net_move = target_val - m['existing_balance_usd']
+            
+            # Recalculate metrics based on this Clean target
             new_apy = opt.simulate_apy(m, target_val)
             new_annual_interest += (target_val * new_apy)
             
-            action = "🟢 DEPOSIT" if net_move > 0.01 else ("🔴 WITHDRAW" if net_move < -0.01 else "⚪ HOLD")
+            # Action Labels
+            if net_move > 0.01:
+                action = "🟢 DEPOSIT"
+            elif net_move < -0.01:
+                action = "🔴 WITHDRAW"
+            else:
+                action = "⚪ HOLD"
             
             results.append({
                 "Market": f"{m['Loan Token']}/{m['Collateral']}",
@@ -696,10 +712,6 @@ if not df_selected.empty:
                 "Annual $ Yield": target_val * new_apy,
             })
         
-        # 4. Insert Alert if logic triggered
-        if skipped_count > 0:
-            st.warning(f"⚠️ Filter Active: {skipped_count} suggested moves were suppressed because they were less than ${min_move_thresh}. These are marked as 'HOLD'.")
-        
         df_res = pd.DataFrame(results)
         
         # Add % Contributing to APY Column
@@ -707,7 +719,6 @@ if not df_selected.empty:
         df_res = pd.DataFrame(results)
         
         # Add % Contributing to APY Column
-        # Calculated as: Portfolio Weight * New APY
         if total_optimizable > 0:
             df_res["% Contributing to APY"] = (df_res["Target ($)"] / total_optimizable) * df_res["New APY"]
         else:
@@ -753,7 +764,6 @@ if not df_selected.empty:
             help="Extra annual interest earned compared to current setup"
         )
         
-        # Diversity metric placed below or in a separate row if preferred
         st.caption(f"**Diversity Index:** {selected_diversity:.4f} (1.0 is perfectly diversified, closer to 0 is concentrated)")
         
         # 2. Detailed Interest Breakdown
