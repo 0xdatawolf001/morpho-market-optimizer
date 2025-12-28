@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 import math
 from scipy.optimize import minimize
+from scipy.optimize import differential_evolution
 import time
 
 # ==========================================
@@ -170,31 +171,22 @@ def fetch_live_market_details(selected_df):
 # 3. OPTIMIZER
 # ==========================================
 
+from scipy.optimize import differential_evolution
+
 class RebalanceOptimizer:
     def __init__(self, total_budget, market_list):
         self.total_budget = total_budget 
         self.markets = market_list
 
     def simulate_apy(self, market, user_new_alloc_usd):
-        # Short-circuit for no meaningful change (compare USD before Wei conversion)
-        change_threshold = 0.000000000000001
-        if abs(user_new_alloc_usd - market['existing_balance_usd']) < change_threshold:
-            return market['current_supply_apy']
-        
-        # Calculate user's existing and new allocation in Wei
+        # Optimization logic remains the same
         user_existing_wei = market['existing_balance_usd'] * (10**market['Decimals'])
         user_new_wei = user_new_alloc_usd * (10**market['Decimals'])
-        
-        # Calculate other users' supply (exclude current user's existing allocation)
         other_users_supply_wei = max(0, market['raw_supply'] - user_existing_wei)
-        
-        # Simulated total supply with user's new allocation
         simulated_total_supply_wei = other_users_supply_wei + user_new_wei
         
-        if simulated_total_supply_wei <= 0: 
-            return 0.0
+        if simulated_total_supply_wei <= 0: return 0.0
         
-        # Calculate utilization rate and APY
         new_util = market['raw_borrow'] / simulated_total_supply_wei
         new_mult = compute_curve_multiplier(new_util)
         new_borrow_rate = market['rate_at_target'] * new_mult
@@ -202,24 +194,43 @@ class RebalanceOptimizer:
         
         return rate_per_second_to_apy(new_supply_rate)
 
-
     def objective(self, x):
+        # We need to normalize x so the sum always equals total_budget
+        # Differential Evolution is better at bounds than constraints
+        sum_x = np.sum(x)
+        if sum_x == 0: return 0
+        
+        # Scale the weights so they always add up to exactly the total budget
+        scaling_factor = self.total_budget / sum_x
+        normalized_x = x * scaling_factor
+        
         total_yield = 0
-        for i, alloc in enumerate(x):
+        for i, alloc in enumerate(normalized_x):
             total_yield += (alloc * self.simulate_apy(self.markets[i], alloc))
+        
         return -total_yield
 
     def optimize(self):
         n = len(self.markets)
-        res = minimize(
+        # Bounds: each market can have between 0 and the total budget
+        bounds = [(0, self.total_budget)] * n
+        
+        # Differential Evolution is a "Global" solver
+        res = differential_evolution(
             self.objective,
-            [self.total_budget/n]*n,
-            method="SLSQP",
-            bounds=[(0, self.total_budget)]*n,
-            constraints=({'type': 'eq', 'fun': lambda x: np.sum(x) - self.total_budget}),
-            options={"maxiter": 10000}   # <- set your cap here
+            bounds,
+            strategy='best1bin', # Tries to find the best, then perturbs it
+            maxiter=1000,
+            popsize=15,          # Number of portfolios to maintain simultaneously
+            tol=0.01,
+            mutation=(0.5, 1),   # This is the "backtracking" / jumping logic
+            recombination=0.7
         )
-        return res.x if res.success else None
+        
+        if res.success:
+            # Re-normalize the final answer to ensure budget parity
+            return res.x * (self.total_budget / np.sum(res.x))
+        return None
 
 # ==========================================
 # 4. STREAMLIT UI
