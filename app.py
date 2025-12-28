@@ -363,7 +363,7 @@ with st.form("market_filter_form"):
     x_apy_in = r1_c1.number_input("Max APY %", 0.0, 200.0, 200.0)
     m_util_in = r1_c2.number_input("Min Util %", 0.0, 100.0, 0.0)
     x_util_in = r1_c2.number_input("Max Util %", 0.0, 100.0, 100.0)
-    apply_btn = st.form_submit_button("Apply Filters", type="primary", use_container_width=True)
+    apply_btn = st.form_submit_button("Apply Filters", type="primary", width='stretch')
 
 # --- FILTER APPLICATION ---
 df_filtered = df_all.copy()
@@ -383,7 +383,7 @@ df_filtered = df_filtered[
     (df_filtered['Utilization'] <= x_util_in)
 ]
 
-st.dataframe(df_filtered, use_container_width=True, hide_index=True)
+st.dataframe(df_filtered, width='stretch', hide_index=True)
 
 st.divider()
 
@@ -430,7 +430,7 @@ if not df_selected.empty:
         df_selected[['Market ID', 'Loan Token', 'Collateral', 'Existing Balance (USD)']],
         column_config={"Existing Balance (USD)": st.column_config.NumberColumn(format="$%.2f")},
         disabled=['Market ID', 'Loan Token', 'Collateral'],
-        use_container_width=True, hide_index=True, key="portfolio_editor"
+        width='stretch', hide_index=True, key="portfolio_editor"
     )
 
     for _, row in edited_df.iterrows():
@@ -464,7 +464,7 @@ if not df_selected.empty:
             st.caption("Balances Yield and Diversity (HHI). Seeks the highest yield possible while maintaining a distributed allocation.")
 
     # --- BUTTON TO RUN AND SAVE TO STATE ---
-    if st.button("🚀 Run Optimization", type="primary", use_container_width=True):
+    if st.button("🚀 Run Optimization", type="primary", width='stretch'):
         market_data_list = fetch_live_market_details(df_selected)
         for m in market_data_list:
             m['existing_balance_usd'] = st.session_state.balance_cache.get(m['Market ID'], 0.0)
@@ -557,7 +557,7 @@ if not df_selected.empty:
                 tooltip=['Type', 'Blended APY', 'Diversity Score']
             )
             
-            st.altair_chart(base + points, use_container_width=True)
+            st.altair_chart(base + points, width='stretch')
             st.caption("Red: Max Yield. Magenta: Max Diversity. Purple: Tangency (Risk Adjusted).")
 
         # 2. LINE CHART (CONVERGENCE)
@@ -582,7 +582,7 @@ if not df_selected.empty:
                     range=['#F44336', '#E040FB', '#7C4DFF']
                 ))
             )
-            st.altair_chart(line_chart, use_container_width=True)
+            st.altair_chart(line_chart, width='stretch')
 
         # --- MULTI-BAR CHART (ALL PORTFOLIOS) ---
         st.divider()
@@ -609,8 +609,7 @@ if not df_selected.empty:
             tooltip=['Market', 'Strategy', 'Alloc ($)']
         ).properties(width=80) 
         
-        # Added use_container_width=True to fill screen
-        st.altair_chart(bar_chart, use_container_width=True)
+        st.altair_chart(bar_chart, width='stretch')
 
         # --- SELECTION & TABLE RESULTS ---
         st.divider()
@@ -683,7 +682,7 @@ if not df_selected.empty:
                 "Target ($)": "${:,.2f}", "Net Move ($)": "${:,.2f}",
                 "Current APY": "{:.4%}", "New APY": "{:.4%}", 
                 "Annual $ Yield": "${:,.2f}", "Yield Contribution": "{:.2%}"
-            }), use_container_width=True, hide_index=True
+            }), width='stretch', hide_index=True
         )
 else:
     st.warning("Please paste Market IDs or Monarch links in Section 2 to begin.")
