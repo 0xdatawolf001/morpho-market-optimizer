@@ -797,5 +797,106 @@ if not df_selected.empty:
                 "Current APY", "New APY", "Annual $ Yield", "% Contributing to APY"
             ]
         )
+
+        # ==========================================
+        # 5. EXECUTION PLAN (MARKET-TO-MARKET)
+        # ==========================================
+        st.divider()
+        st.subheader("📋 Rebalancing Actions (Step-by-Step)")
+        st.caption("Explicit instructions on how to move funds. 'Destination Final Balance' updates cumulatively.")
+
+        # --- PREPARE DATA FOR MATCHING ALGORITHM ---
+        
+        # 1. Identify Sources (Where money comes from)
+        sources = []
+        
+        # A. From Withdrawals
+        withdraw_df = df_res[df_res["Net Move ($)"] < -0.01]
+        for _, row in withdraw_df.iterrows():
+            sources.append({
+                "name": row['Market'],
+                "available": abs(row['Net Move ($)']),
+                "type": "Market"
+            })
+            
+        # B. From New Cash
+        if new_cash > 0.01:
+            sources.append({
+                "name": "New Capital (Wallet)",
+                "available": new_cash,
+                "type": "Wallet"
+            })
+            
+        # 2. Identify Destinations (Where money goes)
+        destinations = []
+        deposit_df = df_res[df_res["Net Move ($)"] > 0.01]
+        for _, row in deposit_df.iterrows():
+            destinations.append({
+                "name": row['Market'],
+                "needed": row['Net Move ($)'],
+                # Start with CURRENT balance, not target. 
+                # We will increment this as we fill it to show the cumulative effect.
+                "running_balance": row['Current ($)'] 
+            })
+
+        # --- GREEDY MATCHING ALGORITHM ---
+        transfer_steps = []
+        
+        src_idx = 0
+        dst_idx = 0
+        
+        while src_idx < len(sources) and dst_idx < len(destinations):
+            src = sources[src_idx]
+            dst = destinations[dst_idx]
+            
+            # Determine how much can be moved in this specific pairing
+            amount_to_move = min(src['available'], dst['needed'])
+            
+            if amount_to_move > 0.01: # Filter dust
+                # Increment the running balance for the destination
+                dst['running_balance'] += amount_to_move
+                
+                transfer_steps.append({
+                    "From (Source)": src['name'],
+                    "To (Destination)": dst['name'],
+                    "Transfer Amount ($)": amount_to_move,
+                    "Destination Final Balance ($)": dst['running_balance']
+                })
+            
+            # Update availability/needs
+            src['available'] -= amount_to_move
+            dst['needed'] -= amount_to_move
+            
+            # Move indices if exhausted/filled
+            if src['available'] < 0.01:
+                src_idx += 1
+            if dst['needed'] < 0.01:
+                dst_idx += 1
+
+        # --- DISPLAY RESULTS ---
+        if transfer_steps:
+            df_actions = pd.DataFrame(transfer_steps)
+            
+            # Add Step Number Column
+            df_actions.insert(0, "Step", range(1, len(df_actions) + 1))
+            
+            st.info(f"Generated {len(transfer_steps)} specific transfer actions to rebalance the portfolio.")
+            
+            st.dataframe(
+                df_actions.style.format({
+                    "Transfer Amount ($)": "${:,.2f}",
+                    "Destination Final Balance ($)": "${:,.2f}"
+                }),
+                width='stretch',
+                hide_index=True
+            )
+        else:
+            st.success("✅ Portfolio is already optimized. No actions needed.")
+
+        # Sanity warning if math doesn't perfectly zero out
+        remaining_src = sum(s['available'] for s in sources)
+        remaining_dst = sum(d['needed'] for d in destinations)
+        if remaining_src > 1.0 or remaining_dst > 1.0:
+            st.warning(f"Note: Due to liquidity constraints or rounding, ${max(remaining_src, remaining_dst):.2f} could not be perfectly allocated.")
 else:
     st.warning("Please paste Market IDs or Monarch links in Section 2 to begin.")
