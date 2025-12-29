@@ -758,7 +758,7 @@ if not df_selected.empty:
             help="Principal plus projected annual interest"
         )
         m5.metric(
-            "Additional Gain", 
+            "Additional Annual Gain After Optimization", 
             f"${interest_diff:,.2f}",
             delta_color="normal",
             help="Extra annual interest earned compared to current setup"
