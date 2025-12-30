@@ -512,7 +512,19 @@ if not df_selected.empty:
                 if "Existing Balance (USD)" in changes:
                     # Map the row index back to the specific Market ID
                     m_id = df_selected.iloc[idx]['Market ID']
-                    st.session_state.balance_cache[m_id] = float(changes["Existing Balance (USD)"])
+                    
+                    raw_val = changes["Existing Balance (USD)"]
+                    
+                    # FIX: Handle None/Null inputs safely
+                    try:
+                        if raw_val is None:
+                            val = 0.0
+                        else:
+                            val = float(raw_val)
+                    except (ValueError, TypeError):
+                        val = 0.0
+                        
+                    st.session_state.balance_cache[m_id] = val
 
     # 3. Data Editor with explicit key and callback
     edited_df = st.data_editor(
