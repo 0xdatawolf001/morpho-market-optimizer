@@ -133,7 +133,7 @@ def get_market_dictionary():
         
         supply_assets = safe_float(state.get('supplyAssets'))
         borrow_assets = safe_float(state.get('borrowAssets'))
-        utilization = (borrow_assets / supply_assets * 100) if supply_assets > 0 else 0
+        utilization = (borrow_assets / supply_assets) if supply_assets > 0 else 0
         
         processed.append({
             "Market ID": m['uniqueKey'],
