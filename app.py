@@ -774,8 +774,15 @@ if not df_selected.empty:
             
             net_move = target_val - m['existing_balance_usd']
             
-            # Recalculate metrics based on this Clean target
-            new_apy = opt.simulate_apy(m, target_val)
+            # --- FIX: Floating Point Drift Prevention ---
+            # If the optimizer suggests holding (no significant move), 
+            # we trust the API's current APY to be the "Truth".
+            # This prevents 4.0000% becoming 4.0001% due to float math on huge numbers.
+            if abs(net_move) < 0.01:
+                new_apy = m['current_supply_apy']
+            else:
+                new_apy = opt.simulate_apy(m, target_val)
+
             new_annual_interest += (target_val * new_apy)
             
             # Action Labels
