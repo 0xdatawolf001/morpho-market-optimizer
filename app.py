@@ -395,7 +395,7 @@ st.caption("Use the filters below to narrow down markets, then copy Market IDs f
 
 # Simplified token helper: returns sorted list of unique symbols
 def get_tokens(df, col):
-    print(f"[Execution] Extracting unique symbols for column: {col}")
+    """Extracted unique symbols without terminal logging."""
     unique_symbols = df[col].dropna().unique()
     return sorted([str(s) for s in unique_symbols if str(s).lower() != 'nan'])
 
@@ -424,11 +424,9 @@ if sel_chains:
     df_filtered = df_filtered[df_filtered['Chain'].isin(sel_chains)]
     
 if sel_loans:
-    print(f"[Execution] Filtering for Loan Tokens: {sel_loans}")
     df_filtered = df_filtered[df_filtered['Loan Token'].isin(sel_loans)]
     
 if sel_colls:
-    print(f"[Execution] Filtering for Collateral Tokens: {sel_colls}")
     df_filtered = df_filtered[df_filtered['Collateral'].isin(sel_colls)]
 
 if show_whitelisted: 
@@ -501,20 +499,33 @@ with col_param:
 if not df_selected.empty:
     st.info("💡 Enter your current USD holdings for the selected markets:")
     
-    # Track existing balances
-    df_selected['Existing Balance (USD)'] = df_selected['Market ID'].apply(lambda x: st.session_state.balance_cache.get(x, 0.0))
-    
-    edited_df = st.data_editor(
-        df_selected[['Market ID', 'Loan Token', 'Collateral', 'Existing Balance (USD)']],
-        column_config={"Existing Balance (USD)": st.column_config.NumberColumn(format="$%.2f")},
-        disabled=['Market ID', 'Loan Token', 'Collateral'],
-        width='stretch', hide_index=True, key="portfolio_editor"
+    # 1. Ensure current state is mapped to the dataframe
+    df_selected['Existing Balance (USD)'] = df_selected['Market ID'].apply(
+        lambda x: st.session_state.balance_cache.get(x, 0.0)
     )
 
-    for _, row in edited_df.iterrows():
-        st.session_state.balance_cache[row['Market ID']] = row['Existing Balance (USD)']
+    # 2. Callback to sync editor state to session_state immediately
+    def sync_portfolio_edits():
+        if "portfolio_editor" in st.session_state:
+            edits = st.session_state["portfolio_editor"].get("edited_rows", {})
+            for idx, changes in edits.items():
+                if "Existing Balance (USD)" in changes:
+                    # Map the row index back to the specific Market ID
+                    m_id = df_selected.iloc[idx]['Market ID']
+                    st.session_state.balance_cache[m_id] = float(changes["Existing Balance (USD)"])
 
-    current_wealth = edited_df['Existing Balance (USD)'].sum()
+    # 3. Data Editor with explicit key and callback
+    edited_df = st.data_editor(
+        df_selected[['Market ID', 'Loan Token', 'Collateral', 'Existing Balance (USD)']],
+        column_config={"Existing Balance (USD)": st.column_config.NumberColumn(format="$%.2f", min_value=0.0)},
+        disabled=['Market ID', 'Loan Token', 'Collateral'],
+        width='stretch', 
+        hide_index=True, 
+        key="portfolio_editor",
+        on_change=sync_portfolio_edits
+    )
+
+    current_wealth = sum(st.session_state.balance_cache.get(m_id, 0.0) for m_id in df_selected['Market ID'])
     total_optimizable = current_wealth + new_cash
 
     # ==========================================
@@ -785,7 +796,7 @@ if not df_selected.empty:
         current_ann = res_data['current_metrics']['annual_interest']
         new_blended_apy = new_annual_interest / total_optimizable if total_optimizable > 0 else 0.0
         
-        # --- 1. Financial Summary Metrics (RESTORED) ---
+# --- 1. Financial Summary Metrics (UPDATED LABELS) ---
         st.subheader("Optimization Summary")
 
         # Calculate differences for deltas
@@ -808,20 +819,24 @@ if not df_selected.empty:
             delta=f"{apy_diff*100:.3f}%",
             help="Projected APY after rebalancing/deploying capital"
         )
-        m3.metric("Total Wealth", f"${total_optimizable:,.2f}")
+        m3.metric(
+            "Additional Annual Gain After Optimization", 
+            f"${interest_diff:,.2f}",
+            delta_color="normal",
+            help="Extra annual interest earned compared to current setup"
+        )
         m4.metric(
             "Total Wealth (1 Yr)", 
             f"${total_optimizable + new_annual_interest:,.2f}",
             help="Principal plus projected annual interest"
         )
         m5.metric(
-            "Additional Annual Gain After Optimization", 
-            f"${interest_diff:,.2f}",
-            delta_color="normal",
-            help="Extra annual interest earned compared to current setup"
+            "Diversity Score", 
+            f"{selected_diversity:.4f}",
+            help="1.0 is perfectly diversified, closer to 0 is concentrated"
         )
         
-        st.caption(f"**Diversity Index:** {selected_diversity:.4f} (1.0 is perfectly diversified, closer to 0 is concentrated)")
+        st.caption(f"**Diversity Index:** {selected_diversity:.4f} (1.0 is perfectly diversified, closer to 0 is concentrated.)")
         
         # 2. Detailed Interest Breakdown
         st.write("---")
