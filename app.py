@@ -820,16 +820,18 @@ if not df_selected.empty:
             help="Projected APY after rebalancing/deploying capital"
         )
         m3.metric(
+            "Total Wealth (After 1 Yr)", 
+            f"${total_optimizable + new_annual_interest:,.2f}",
+            help="Principal plus projected annual interest"
+        )
+
+        m4.metric(
             "Additional Annual Gain After Optimization", 
             f"${interest_diff:,.2f}",
             delta_color="normal",
             help="Extra annual interest earned compared to current setup"
         )
-        m4.metric(
-            "Total Wealth (1 Yr)", 
-            f"${total_optimizable + new_annual_interest:,.2f}",
-            help="Principal plus projected annual interest"
-        )
+
         m5.metric(
             "Diversity Score", 
             f"{selected_diversity:.4f}",
