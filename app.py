@@ -89,7 +89,12 @@ def get_market_dictionary():
         items {
           uniqueKey
           whitelisted
-          loanAsset { symbol decimals chain { id } }
+          loanAsset { 
+            symbol 
+            decimals 
+            priceUsd 
+            chain { id } 
+          }
           collateralAsset { symbol }
           state {
             supplyApy
@@ -107,12 +112,18 @@ def get_market_dictionary():
     load_status = st.empty()
     
     while True:
-        load_status.info(f"⏳ Retrieving Morpho Markets... {len(all_items)} of 3000+ markets found. Please wait as we are downloading 1000 market at a time...")
+        load_status.info(f"⏳ Retrieving Morpho Markets... {len(all_items)} found. Please wait...")
         resp = requests.post(MORPHO_API_URL, json={'query': query, 'variables': {"first": BATCH_SIZE, "skip": skip}})
-        data = resp.json()['data']['markets']['items']
-        if not data: break
-        all_items.extend(data)
-        if len(data) < BATCH_SIZE: break
+        json_data = resp.json()
+        
+        if 'data' not in json_data:
+            st.error(f"API Error: {json_data.get('errors', 'Unknown Error')}")
+            st.stop()
+            
+        items = json_data['data']['markets']['items']
+        if not items: break
+        all_items.extend(items)
+        if len(items) < BATCH_SIZE: break
         skip += BATCH_SIZE
         
     load_status.empty()
@@ -129,11 +140,9 @@ def get_market_dictionary():
         
         supply_usd = safe_float(state.get('supplyAssetsUsd'))
         borrow_usd = safe_float(state.get('borrowAssetsUsd'))
-        available_liquidity = supply_usd - borrow_usd
         
-        supply_assets = safe_float(state.get('supplyAssets'))
-        borrow_assets = safe_float(state.get('borrowAssets'))
-        utilization = (borrow_assets / supply_assets) if supply_assets > 0 else 0
+        # Capture the price from the API
+        price_usd = safe_float(loan.get('priceUsd'), default=1.0)
         
         processed.append({
             "Market ID": m['uniqueKey'],
@@ -141,12 +150,13 @@ def get_market_dictionary():
             "Loan Token": loan.get('symbol'),
             "Collateral": (m.get('collateralAsset') or {}).get('symbol'),
             "Decimals": loan.get('decimals'),
+            "Price USD": price_usd,
             "ChainID": loan.get('chain', {}).get('id'),
             "Supply APY": safe_float(state.get('supplyApy')),
-            "Utilization": utilization,
+            "Utilization": (safe_float(state.get('borrowAssets')) / safe_float(state.get('supplyAssets'))) if safe_float(state.get('supplyAssets')) > 0 else 0,
             "Total Supply (USD)": supply_usd,
             "Total Borrow (USD)": borrow_usd,
-            "Available Liquidity (USD)": available_liquidity,
+            "Available Liquidity (USD)": supply_usd - borrow_usd,
             "Whitelisted": m.get('whitelisted', False)
         })
     return (pd.DataFrame(processed) 
@@ -192,14 +202,10 @@ class RebalanceOptimizer:
         self.total_budget = total_budget 
         self.markets = market_list
         self.hurdle_rate = hurdle_rate_pct / 100.0
-        
-        # Tracking history for charts
         self.yield_trace = []    
         self.frontier_trace = [] 
         self.car_trace = []      
         self.all_attempts = []   
-        
-        # Current Optimization Context
         self.current_phase = "Initializing"
         self.start_time = time.time()
 
@@ -208,16 +214,22 @@ class RebalanceOptimizer:
         if abs(user_new_alloc_usd - market['existing_balance_usd']) < change_threshold:
             return market['current_supply_apy']
         
+        # Correct math: (USD Amount / Price) = Actual Token Amount
+        token_price = market['Price USD']
         multiplier = 10**market['Decimals']
-        user_existing_wei = market['existing_balance_usd'] * multiplier
-        user_new_wei = user_new_alloc_usd * multiplier
         
+        # Convert USD to Token Wei
+        user_existing_wei = (market['existing_balance_usd'] / token_price) * multiplier
+        user_new_wei = (user_new_alloc_usd / token_price) * multiplier
+        
+        # Calculate what other people have supplied in the market
         other_users_supply_wei = max(0, market['raw_supply'] - user_existing_wei)
         simulated_total_supply_wei = other_users_supply_wei + user_new_wei
         
         if simulated_total_supply_wei <= 0: 
             return 0.0
         
+        # Standard Morpho Interest Rate Model logic
         new_util = market['raw_borrow'] / simulated_total_supply_wei
         new_mult = compute_curve_multiplier(new_util)
         new_borrow_rate = market['rate_at_target'] * new_mult
@@ -278,7 +290,6 @@ class RebalanceOptimizer:
         if n == 0: return None, None, None
         
         bounds = [(0, self.total_budget)] * n
-        
         init_pop = []
         for i in range(min(n, 50)):
             g = np.zeros(n)
@@ -287,35 +298,29 @@ class RebalanceOptimizer:
         init_pop.append(np.ones(n) * (self.total_budget/n))
         init = np.array(init_pop) if len(init_pop) >= 5 else None
 
-        self.current_phase = "Max Yield"
         res_yield = differential_evolution(
             self.objective_yield, bounds, strategy='best1bin',
-            maxiter=100000, popsize=10, tol=0.01,
-            init=init if init is not None and init.shape[0] >= 5 else 'latinhypercube',
-            mutation=(0.5, 1), recombination=0.7
+            maxiter=1000, popsize=10, tol=0.01,
+            init=init if init is not None and init.shape[0] >= 5 else 'latinhypercube'
         )
         best_yield_alloc = self._get_normalized_allocations(res_yield.x)
 
-        self.current_phase = "Frontier"
         res_frontier = differential_evolution(
             self.objective_frontier, bounds, strategy='best1bin',
-            maxiter=100000, popsize=10, tol=0.01,
-            init=init if init is not None and init.shape[0] >= 5 else 'latinhypercube',
-            mutation=(0.5, 1), recombination=0.7
+            maxiter=1000, popsize=10, tol=0.01,
+            init=init if init is not None and init.shape[0] >= 5 else 'latinhypercube'
         )
         best_frontier_alloc = self._get_normalized_allocations(res_frontier.x)
 
-        self.current_phase = "Concentration-Adj"
         res_car = differential_evolution(
             self.objective_car, bounds, strategy='best1bin',
-            maxiter=100000, popsize=10, tol=0.01,
-            init=init if init is not None and init.shape[0] >= 5 else 'latinhypercube',
-            mutation=(0.5, 1), recombination=0.7
+            maxiter=1000, popsize=10, tol=0.01,
+            init=init if init is not None and init.shape[0] >= 5 else 'latinhypercube'
         )
         best_car_alloc = self._get_normalized_allocations(res_car.x)
         
         return best_yield_alloc, best_frontier_alloc, best_car_alloc
-
+    
 # ==========================================
 # 4. STREAMLIT UI
 # ==========================================
