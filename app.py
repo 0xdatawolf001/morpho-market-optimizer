@@ -210,29 +210,36 @@ class RebalanceOptimizer:
         self.start_time = time.time()
 
     def simulate_apy(self, market, user_new_alloc_usd):
-        change_threshold = 1e-15 
-        if abs(user_new_alloc_usd - market['existing_balance_usd']) < change_threshold:
-            return market['current_supply_apy']
-        
-        # Correct math: (USD Amount / Price) = Actual Token Amount
+        # 1. Get Market Constants
         token_price = market['Price USD']
         if token_price <= 0: return 0.0
+        decimals = market['Decimals']
+        multiplier = 10**decimals
 
-        multiplier = 10**market['Decimals']
+        # 2. Determine "World Without User" (Base State)
+        # We assume the current API data includes the user's existing funds.
+        # We strip them out to find the "Base Supply".
+        user_existing_usd = market.get('existing_balance_usd', 0.0)
+        user_existing_wei = (user_existing_usd / token_price) * multiplier
         
-        # Convert USD to Token Wei
-        user_existing_wei = (market['existing_balance_usd'] / token_price) * multiplier
+        current_total_supply_wei = market['raw_supply']
+        
+        # Base Supply = Total Supply - User's Current Holdings
+        # (Use max to prevent negative supply due to tiny rounding errors)
+        base_supply_wei = max(0, current_total_supply_wei - user_existing_wei)
+        
+        # 3. Add "New" Allocation
         user_new_wei = (user_new_alloc_usd / token_price) * multiplier
+        simulated_total_supply_wei = base_supply_wei + user_new_wei
         
-        # Calculate what other people have supplied in the market
-        other_users_supply_wei = max(0, market['raw_supply'] - user_existing_wei)
-        simulated_total_supply_wei = other_users_supply_wei + user_new_wei
-        
+        # 4. Standard Morpho Math
         if simulated_total_supply_wei <= 0: 
             return 0.0
         
-        # Standard Morpho Interest Rate Model logic
+        # Borrow remains constant (assuming user is only a supplier)
+        # Utilization = Borrow / (Base + New User Funds)
         new_util = market['raw_borrow'] / simulated_total_supply_wei
+        
         new_mult = compute_curve_multiplier(new_util)
         new_borrow_rate = market['rate_at_target'] * new_mult
         new_supply_rate = new_borrow_rate * new_util * (1 - market['fee'])
@@ -240,8 +247,11 @@ class RebalanceOptimizer:
         return rate_per_second_to_apy(new_supply_rate)
 
     def _get_normalized_allocations(self, x):
+        # Ensure no negative values from solver noise
+        x = np.maximum(x, 0)
         sum_x = np.sum(x)
         if sum_x == 0: return x 
+        # Scale to match exact budget
         return x * (self.total_budget / sum_x)
 
     def _calculate_metrics(self, x):
@@ -250,6 +260,7 @@ class RebalanceOptimizer:
         
         total_yield = 0
         for i, alloc in enumerate(normalized_x):
+            # simulate_apy handles the "dilution" logic internally
             total_yield += (alloc * self.simulate_apy(self.markets[i], alloc))
             
         hhi = np.sum(weights**2)
@@ -291,16 +302,33 @@ class RebalanceOptimizer:
         n = len(self.markets)
         if n == 0: return None, None, None
         
-        # --- FIXED: Liquidity Constrained Bounds ---
+        # --- 1. Define Bounds (Liquidity Constraints) ---
         bounds = []
         for m in self.markets:
-            # 1. Calculate Available Liquidity in USD
+            # Calculate Available Liquidity in USD
             raw_supply = m.get('raw_supply', 0)
             raw_borrow = m.get('raw_borrow', 0)
             price = m.get('Price USD', 0)
             decimals = m.get('Decimals', 18)
             
-            # Calculate USD Liquidity
+            # Liquidity available for WITHDRAWAL
+            # (If we withdraw, we reduce supply, but we can't withdraw more than we have)
+            # Actually, the optimizer is choosing a *Target Position*.
+            # The only hard constraint is: Target >= 0
+            # AND Target <= Liquidity Cap? No, user can supply as much as they want (up to budget).
+            # The *real* constraint is on the downside: We can't withdraw what we don't have.
+            # But since we are solving for "Target Allocation", the implicit bound is just 0 to Budget.
+            
+            # Wait, there is a nuance: If the POOL has limited liquidity, we can't withdraw? 
+            # No, if we supplied it, we can withdraw it (unless bad debt, which we assume away here).
+            # The only limit is we can't sell more than we own.
+            # Since the optimizer sets the absolute "Target Balance", the lower bound is simply 0.
+            
+            # HOWEVER: The previous logic had a check for `current_balance - available_liq`.
+            # This is only relevant if you want to *force* the user to stay in a pool because it's illiquid.
+            # For a pure optimizer, we assume we *can* move funds. 
+            # If you want to be safe, we keep the previous logic:
+            
             available_liq_tokens = max(0, raw_supply - raw_borrow)
             if price > 0:
                 available_liq_usd = (available_liq_tokens / (10**decimals)) * price
@@ -309,65 +337,44 @@ class RebalanceOptimizer:
 
             current_balance = m.get('existing_balance_usd', 0.0)
             
-            # Constraint: Minimum Allocation = Current Balance - Available Liquidity
+            # Prevent withdrawing from a utilization > 100% pool (optional safety)
+            # If Util > 100%, Available Liquidity is 0. 
+            # Lower bound = Current Balance - 0 = Current Balance (Locked).
             lower_bound = max(0.0, current_balance - available_liq_usd)
             
-            # Upper bound: The optimizer can allocate up to the full budget
             bounds.append((lower_bound, self.total_budget))
 
-        # --- STABILITY FIX 1: WARM START (Inject User Portfolio) ---
-        init_pop = []
+        # --- 2. Initial Guess (COLD START) ---
+        # Crucial Change: We do NOT use the current portfolio.
+        # We start with an Equal Weight distribution.
+        # This acts as a "Fresh Look" at the markets.
+        x0 = np.full(n, self.total_budget / n)
+
+        # --- 3. Budget Constraint ---
+        constraints = ({'type': 'eq', 'fun': lambda x: np.sum(x) - self.total_budget})
+
+        # --- 4. Run SLSQP Solvers ---
+        # Precision solver. Since we stripped the "User Memory" in simulate_apy,
+        # and we use an Equal Weight start, it will "Water Fill" the pools correctly.
         
-        # Get current user positions
-        current_holdings = np.array([m.get('existing_balance_usd', 0.0) for m in self.markets])
-        sum_holdings = np.sum(current_holdings)
-
-        # If user has positions, scale them to the NEW total budget (Holdings + New Cash)
-        # This tells the solver: "Start by assuming we just top up existing positions proportionally"
-        if sum_holdings > 0:
-            scaled_holdings = current_holdings * (self.total_budget / sum_holdings)
-            init_pop.append(scaled_holdings)
-
-        # Create heuristics that respect the new lower bounds
-        for i in range(min(n, 50)):
-            g = []
-            for j in range(n):
-                if i == j:
-                    g.append(self.total_budget) 
-                else:
-                    g.append(bounds[j][0]) # Use the calculated lower bound
-            init_pop.append(np.array(g))
-            
-        # Add an "Equal Weight" heuristic respecting bounds
-        avg_alloc = self.total_budget / n
-        equal_pop = [max(avg_alloc, bounds[j][0]) for j in range(n)]
-        init_pop.append(np.array(equal_pop))
-
-        # Check if we have enough population
-        init = np.array(init_pop) if len(init_pop) >= 5 else None
-
-        # --- STABILITY FIX 2: SEED & TOLERANCE ---
-        # Added seed=42 for deterministic results
-        # Tightened tol to 0.001 and increased popsize to 15 for better precision
-        
-        res_yield = differential_evolution(
-            self.objective_yield, bounds, strategy='best1bin',
-            maxiter=1000, popsize=15, tol=0.001, seed=42, 
-            init=init if init is not None and init.shape[0] >= 5 else 'latinhypercube'
+        # A. Best Yield
+        res_yield = minimize(
+            self.objective_yield, x0, method='SLSQP', bounds=bounds, constraints=constraints,
+            tol=1e-6, options={'maxiter': 10000}
         )
         best_yield_alloc = self._get_normalized_allocations(res_yield.x)
 
-        res_frontier = differential_evolution(
-            self.objective_frontier, bounds, strategy='best1bin',
-            maxiter=1000, popsize=15, tol=0.001, seed=42,
-            init=init if init is not None and init.shape[0] >= 5 else 'latinhypercube'
+        # B. Frontier
+        res_frontier = minimize(
+            self.objective_frontier, x0, method='SLSQP', bounds=bounds, constraints=constraints,
+            tol=1e-6, options={'maxiter': 10000}
         )
         best_frontier_alloc = self._get_normalized_allocations(res_frontier.x)
 
-        res_car = differential_evolution(
-            self.objective_car, bounds, strategy='best1bin',
-            maxiter=1000, popsize=15, tol=0.001, seed=42,
-            init=init if init is not None and init.shape[0] >= 5 else 'latinhypercube'
+        # C. Concentration-Adj Return
+        res_car = minimize(
+            self.objective_car, x0, method='SLSQP', bounds=bounds, constraints=constraints,
+            tol=1e-6, options={'maxiter': 10000}
         )
         best_car_alloc = self._get_normalized_allocations(res_car.x)
         
