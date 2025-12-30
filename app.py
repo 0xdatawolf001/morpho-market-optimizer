@@ -216,6 +216,8 @@ class RebalanceOptimizer:
         
         # Correct math: (USD Amount / Price) = Actual Token Amount
         token_price = market['Price USD']
+        if token_price <= 0: return 0.0
+
         multiplier = 10**market['Decimals']
         
         # Convert USD to Token Wei
@@ -289,32 +291,82 @@ class RebalanceOptimizer:
         n = len(self.markets)
         if n == 0: return None, None, None
         
-        bounds = [(0, self.total_budget)] * n
+        # --- FIXED: Liquidity Constrained Bounds ---
+        bounds = []
+        for m in self.markets:
+            # 1. Calculate Available Liquidity in USD
+            raw_supply = m.get('raw_supply', 0)
+            raw_borrow = m.get('raw_borrow', 0)
+            price = m.get('Price USD', 0)
+            decimals = m.get('Decimals', 18)
+            
+            # Calculate USD Liquidity
+            available_liq_tokens = max(0, raw_supply - raw_borrow)
+            if price > 0:
+                available_liq_usd = (available_liq_tokens / (10**decimals)) * price
+            else:
+                available_liq_usd = 0.0
+
+            current_balance = m.get('existing_balance_usd', 0.0)
+            
+            # Constraint: Minimum Allocation = Current Balance - Available Liquidity
+            lower_bound = max(0.0, current_balance - available_liq_usd)
+            
+            # Upper bound: The optimizer can allocate up to the full budget
+            bounds.append((lower_bound, self.total_budget))
+
+        # --- STABILITY FIX 1: WARM START (Inject User Portfolio) ---
         init_pop = []
+        
+        # Get current user positions
+        current_holdings = np.array([m.get('existing_balance_usd', 0.0) for m in self.markets])
+        sum_holdings = np.sum(current_holdings)
+
+        # If user has positions, scale them to the NEW total budget (Holdings + New Cash)
+        # This tells the solver: "Start by assuming we just top up existing positions proportionally"
+        if sum_holdings > 0:
+            scaled_holdings = current_holdings * (self.total_budget / sum_holdings)
+            init_pop.append(scaled_holdings)
+
+        # Create heuristics that respect the new lower bounds
         for i in range(min(n, 50)):
-            g = np.zeros(n)
-            g[i] = self.total_budget
-            init_pop.append(g)
-        init_pop.append(np.ones(n) * (self.total_budget/n))
+            g = []
+            for j in range(n):
+                if i == j:
+                    g.append(self.total_budget) 
+                else:
+                    g.append(bounds[j][0]) # Use the calculated lower bound
+            init_pop.append(np.array(g))
+            
+        # Add an "Equal Weight" heuristic respecting bounds
+        avg_alloc = self.total_budget / n
+        equal_pop = [max(avg_alloc, bounds[j][0]) for j in range(n)]
+        init_pop.append(np.array(equal_pop))
+
+        # Check if we have enough population
         init = np.array(init_pop) if len(init_pop) >= 5 else None
 
+        # --- STABILITY FIX 2: SEED & TOLERANCE ---
+        # Added seed=42 for deterministic results
+        # Tightened tol to 0.001 and increased popsize to 15 for better precision
+        
         res_yield = differential_evolution(
             self.objective_yield, bounds, strategy='best1bin',
-            maxiter=1000, popsize=10, tol=0.01,
+            maxiter=1000, popsize=15, tol=0.001, seed=42, 
             init=init if init is not None and init.shape[0] >= 5 else 'latinhypercube'
         )
         best_yield_alloc = self._get_normalized_allocations(res_yield.x)
 
         res_frontier = differential_evolution(
             self.objective_frontier, bounds, strategy='best1bin',
-            maxiter=1000, popsize=10, tol=0.01,
+            maxiter=1000, popsize=15, tol=0.001, seed=42,
             init=init if init is not None and init.shape[0] >= 5 else 'latinhypercube'
         )
         best_frontier_alloc = self._get_normalized_allocations(res_frontier.x)
 
         res_car = differential_evolution(
             self.objective_car, bounds, strategy='best1bin',
-            maxiter=1000, popsize=10, tol=0.01,
+            maxiter=1000, popsize=15, tol=0.001, seed=42,
             init=init if init is not None and init.shape[0] >= 5 else 'latinhypercube'
         )
         best_car_alloc = self._get_normalized_allocations(res_car.x)
