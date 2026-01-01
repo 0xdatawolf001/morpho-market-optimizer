@@ -939,7 +939,7 @@ if not df_selected.empty:
         m1.metric("Current APY", f"{current_blended:.4%}")
         m2.metric("Optimized APY", f"{new_blended_apy:.4%}", delta=f"{apy_diff*100:.3f}%")
         m3.metric("Total Wealth (1 Yr)", f"${total_optimizable + new_annual_interest:,.2f}")
-        m4.metric("Gain vs Current", f"${interest_diff:,.2f}")
+        m4.metric("Annual Interest Gain After Optimization", f"${interest_diff:,.2f}")
         m5.metric("Diversity Score", f"{selected_diversity:.4f}")
 
         # Row 2: Time-Based Earnings Breakdown
