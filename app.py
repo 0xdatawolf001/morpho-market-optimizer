@@ -379,8 +379,8 @@ class RebalanceOptimizer:
                 # User enforces the shield. 
                 # Note: SLSQP with Equality Constraint (Sum = Budget) will likely FAIL or return partials if bounds are too tight.
                 self.whale_warning = (
-                    f"⚠️ **Liquidity Capped:** Total Budget (${self.total_budget:,.0f}) exceeds the safe liquidity capacity "
-                    f"(${total_whale_capacity:,.0f}). The solver may fail to allocate the full budget."
+                    f"⚠️ **Liquidity Capped:** Total Budget (\${self.total_budget:,.0f}) exceeds the safe liquidity capacity "
+                    f"(\${total_whale_capacity:,.0f}). The solver may fail to allocate the full budget."
                 )
 
         # --- 2. Setup Solver ---
@@ -919,7 +919,7 @@ if not df_selected.empty:
 
         # Row 2: Time-Based Earnings Breakdown (Restored)
         st.markdown("---")
-        st.caption("📅 Projected Earnings Breakdown (based on new allocation)")
+        st.subheader("📈 Projected Earnings")
         
         t1, t2, t3, t4, t5 = st.columns(5)
         t1.metric("Annual", f"${new_annual_interest:,.2f}")
@@ -929,7 +929,7 @@ if not df_selected.empty:
         t5.metric("Hourly", f"${new_annual_interest/8760:,.4f}")
 
         st.divider()
-        
+        st.subheader("⚖️ Allocations")
         df_res = df_res.sort_values(by=["Action", "Weight"], ascending=[False, False])
 
         st.dataframe(
@@ -947,7 +947,7 @@ if not df_selected.empty:
         )
 
         st.divider()
-        st.subheader("📋 Execution Plan")
+        st.subheader("📋 Execution Plan", help = 'Gives you steps to rebalance')
 
         sources = []
         withdraw_df = df_res[df_res["Net Move ($)"] < -0.01]
