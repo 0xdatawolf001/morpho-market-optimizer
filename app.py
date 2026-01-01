@@ -550,7 +550,7 @@ with col_param:
 
     allow_break = st.checkbox(
         "Allow Whale Shield Overflow?",
-        value=False,
+        value=True,
         help="If your Budget > Safe Liquidity Limits, allow the optimizer to ignore the limits (unsafe) to ensure all money is invested. If unchecked, it will leave cash unallocated."
     )
 
