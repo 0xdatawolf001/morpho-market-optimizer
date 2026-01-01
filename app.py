@@ -853,7 +853,18 @@ if not df_selected.empty:
                 "Ann. Yield": target_val * new_apy,
             })
         
+        # [START REPLACEMENT BLOCK]
         df_res = pd.DataFrame(results)
+        
+        # ---------------------------------------------------------
+        # RE-INSTANTIATED LOGIC: % Contributing to APY
+        # ---------------------------------------------------------
+        if total_optimizable > 0:
+            # Formula: (Allocation / Total Wealth) * APY
+            df_res["Contribution to Portfolio APY"] = (df_res["Target ($)"] / total_optimizable) * df_res["APY"]
+        else:
+            df_res["Contribution to Portfolio APY"] = 0.0
+        # ---------------------------------------------------------
         
         current_blended = res_data['current_metrics']['blended_apy']
         current_ann = res_data['current_metrics']['annual_interest']
@@ -893,7 +904,8 @@ if not df_selected.empty:
                 "Target ($)": "${:,.2f}", 
                 "Net Move ($)": "${:,.2f}",
                 "APY": "{:.4%}", 
-                "Ann. Yield": "${:,.2f}", 
+                "Ann. Yield": "${:,.2f}",
+                "Contribution to Portfolio APY": "{:.4%}" 
             }), 
             width='stretch', 
             hide_index=True
