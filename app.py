@@ -861,9 +861,12 @@ if not df_selected.empty:
 
         results = []
         new_annual_interest = 0
+        total_allocated_usd = 0.0
         
         for i, target_val in enumerate(final_alloc):
             m = market_data_list[i]
+            total_allocated_usd += target_val
+            
             net_move = target_val - m['existing_balance_usd']
             if abs(net_move) < 0.01:
                 new_apy = m['current_supply_apy']
@@ -887,6 +890,87 @@ if not df_selected.empty:
                 "APY": new_apy,
                 "Ann. Yield": target_val * new_apy,
             })
+
+        # --- NEW: Check for Unallocated Capital ---
+        # If the optimizer couldn't fit the budget (e.g., Whale Shield constraints),
+        # the remainder is unallocated cash earning 0%.
+        unallocated_cash = total_optimizable - total_allocated_usd
+        if unallocated_cash > 0.01:
+            results.append({
+                "Market": "⚠️ Unallocated Cash",
+                "Chain": "Wallet",
+                "Action": "⚪ HOLD",
+                "Weight": unallocated_cash / total_optimizable if total_optimizable > 0 else 0,
+                # We set current/net to 0 for display simplicity so it doesn't trigger 
+                # the Execution Plan logic (which looks for Net Move > 0.01)
+                "Current ($)": 0.0, 
+                "Target ($)": unallocated_cash,
+                "Net Move ($)": 0.0, 
+                "APY": 0.0,
+                "Ann. Yield": 0.0,
+            })
+        
+        # [START REPLACEMENT BLOCK]
+        df_res = pd.DataFrame(results)
+        
+        # ---------------------------------------------------------
+        # RE-INSTANTIATED LOGIC: % Contributing to APY
+        # ---------------------------------------------------------
+        if total_optimizable > 0:
+            # Formula: (Allocation / Total Wealth) * APY
+            # Note: Unallocated cash has 0 APY, so it contributes 0.0 to the average, correctly diluting the result.
+            df_res["Contribution to Portfolio APY"] = (df_res["Target ($)"] / total_optimizable) * df_res["APY"]
+        else:
+            df_res["Contribution to Portfolio APY"] = 0.0
+        # ---------------------------------------------------------
+        
+        current_blended = res_data['current_metrics']['blended_apy']
+        current_ann = res_data['current_metrics']['annual_interest']
+        new_blended_apy = new_annual_interest / total_optimizable if total_optimizable > 0 else 0.0
+        
+        apy_diff = new_blended_apy - current_blended
+        interest_diff = new_annual_interest - current_ann
+        
+        # Recalculate diversity including the unallocated portion (if any)
+        # If unallocated is large, HHI increases (concentration in cash), Diversity decreases.
+        selected_weights = np.array([r['Weight'] for r in results])
+        selected_diversity = 1.0 - np.sum(selected_weights**2)
+
+        m1, m2, m3, m4, m5 = st.columns(5) 
+        m1.metric("Current APY", f"{current_blended:.4%}")
+        m2.metric("Optimized APY", f"{new_blended_apy:.4%}", delta=f"{apy_diff*100:.3f}%")
+        m3.metric("Total Wealth (1 Yr)", f"${total_optimizable + new_annual_interest:,.2f}")
+        m4.metric("Gain vs Current", f"${interest_diff:,.2f}")
+        m5.metric("Diversity Score", f"{selected_diversity:.4f}")
+
+        # Row 2: Time-Based Earnings Breakdown (Restored)
+        st.markdown("---")
+        st.subheader("📈 Projected Earnings")
+        
+        t1, t2, t3, t4, t5 = st.columns(5)
+        t1.metric("Annual", f"${new_annual_interest:,.2f}")
+        t2.metric("Monthly", f"${new_annual_interest/12:,.2f}")
+        t3.metric("Weekly", f"${new_annual_interest/52:,.2f}")
+        t4.metric("Daily", f"${new_annual_interest/365:,.2f}")
+        t5.metric("Hourly", f"${new_annual_interest/8760:,.4f}")
+
+        st.divider()
+        st.subheader("⚖️ Allocations")
+        df_res = df_res.sort_values(by=["Action", "Weight"], ascending=[False, False])
+
+        st.dataframe(
+            df_res.style.format({
+                "Weight": "{:.2%}", 
+                "Current ($)": "${:,.2f}", 
+                "Target ($)": "${:,.2f}", 
+                "Net Move ($)": "${:,.2f}",
+                "APY": "{:.4%}", 
+                "Ann. Yield": "${:,.2f}",
+                "Contribution to Portfolio APY": "{:.4%}" 
+            }), 
+            width='stretch', 
+            hide_index=True
+        )
         
         # [START REPLACEMENT BLOCK]
         df_res = pd.DataFrame(results)
