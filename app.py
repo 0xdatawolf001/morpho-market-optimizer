@@ -162,6 +162,7 @@ def get_market_dictionary():
     return (pd.DataFrame(processed) 
               .drop_duplicates(subset=["Market ID"], keep=False) 
               .query('Collateral.notna() & (Collateral != "") & (Collateral != " ")') 
+              .sort_values('Total Supply (USD)', ascending=False)
            )
 
 def fetch_live_market_details(selected_df):
@@ -872,10 +873,8 @@ if not df_selected.empty:
 
             # 2. Calculate Simulated APY
             if abs(net_move) < 0.01:
-                # If no move, simulation equals current state
                 new_apy = current_apy_val
             else:
-                # If moving, run simulation
                 new_apy = opt.simulate_apy(m, target_val)
 
             new_annual_interest += (target_val * new_apy)
@@ -883,6 +882,11 @@ if not df_selected.empty:
             if net_move > 0.01: action = "🟢 DEPOSIT"
             elif net_move < -0.01: action = "🔴 WITHDRAW"
             else: action = "⚪ HOLD"
+
+            # 3. Liquidity Calculations
+            orig_liq = m.get('Available Liquidity (USD)', 0.0)
+            final_liq = orig_liq + net_move
+            pct_final_liq = (target_val / final_liq) if final_liq > 0 else 0.0
             
             results.append({
                 "Market": f"{m['Loan Token']}/{m['Collateral']}",
@@ -892,9 +896,12 @@ if not df_selected.empty:
                 "Current ($)": m['existing_balance_usd'],
                 "Target ($)": target_val,
                 "Net Move ($)": net_move,
-                "Current APY": current_apy_val, # NEW COLUMN
-                "Simulated APY": new_apy,       # NEW COLUMN (Renamed from generic 'APY')
+                "Current APY": current_apy_val,
+                "Simulated APY": new_apy,
                 "Ann. Yield": target_val * new_apy,
+                "Initial Liq.": orig_liq,
+                "Final Liq.": final_liq,
+                "% Liq. Share": pct_final_liq
             })
 
         # --- Check for Unallocated Capital ---
@@ -908,20 +915,17 @@ if not df_selected.empty:
                 "Current ($)": 0.0, 
                 "Target ($)": unallocated_cash,
                 "Net Move ($)": 0.0, 
-                "Current APY": 0.0,   # NEW
-                "Simulated APY": 0.0, # NEW
+                "Current APY": 0.0,
+                "Simulated APY": 0.0,
                 "Ann. Yield": 0.0,
+                "Initial Liq.": 0.0,
+                "Final Liq.": 0.0,
+                "% Liq. Share": 0.0
             })
         
-        # [START REPLACEMENT BLOCK] - Consolidated Logic
         df_res = pd.DataFrame(results)
         
-        # ---------------------------------------------------------
-        # Contribution Logic
-        # ---------------------------------------------------------
         if total_optimizable > 0:
-            # Formula: (Allocation / Total Wealth) * Simulated APY
-            # Fixed: Uses "Simulated APY" instead of the non-existent "APY" key
             df_res["Contribution to Portfolio APY"] = (df_res["Target ($)"] / total_optimizable) * df_res["Simulated APY"]
         else:
             df_res["Contribution to Portfolio APY"] = 0.0
@@ -964,8 +968,11 @@ if not df_selected.empty:
                 "Target ($)": "${:,.2f}", 
                 "Net Move ($)": "${:,.2f}",
                 "Current APY": "{:.4%}",
-                "Simulated APY": "{:.4%}", # Fixed key name here
+                "Simulated APY": "{:.4%}",
                 "Ann. Yield": "${:,.2f}",
+                "Initial Liq.": "${:,.2f}",
+                "Final Liq.": "${:,.2f}",
+                "% Liq. Share": "{:.2%}",
                 "Contribution to Portfolio APY": "{:.4%}" 
             }), 
             width='stretch', 
