@@ -694,21 +694,56 @@ if not df_selected.empty:
         liquid_alloc = res_data['liquid_alloc']
         whale_alloc = res_data['whale_alloc'] # NEW
         
+        # --- [SECTION START: METRIC SUMMARY & STATS] ---
         def get_stats(alloc):
             y = 0
             for i, val in enumerate(alloc):
                 y += (val * opt.simulate_apy(market_data_list[i], val))
-            weights = alloc/total_optimizable if total_optimizable > 0 else np.zeros_like(alloc)
+            # Honest APY: We always divide by total_optimizable budget 
+            # This correctly accounts for unallocated cash in strict Whale Shield mode.
+            weights = alloc / total_optimizable if total_optimizable > 0 else np.zeros_like(alloc)
             div = 1.0 - np.sum(weights**2)
-            return y, y/total_optimizable if total_optimizable>0 else 0, div
+            return y, y / total_optimizable if total_optimizable > 0 else 0, div
 
         y_abs, y_apy, y_div = get_stats(best_yield_alloc)
+        w_abs, w_apy, w_div = get_stats(whale_alloc)
         f_abs, f_apy, f_div = get_stats(frontier_alloc)
         c_abs, c_apy, c_div = get_stats(car_alloc)
         l_abs, l_apy, l_div = get_stats(liquid_alloc)
-        w_abs, w_apy, w_div = get_stats(whale_alloc) # NEW
+
+        # 5-Column High-Level Summary
+        st.subheader("📋 Strategy Comparison")
+        s_col1, s_col2, s_col3, s_col4, s_col5 = st.columns(5)
+        
+        with s_col1:
+            st.markdown("<h4 style='color:#F44336; margin-bottom:0;'>Best Yield</h4>", unsafe_allow_html=True)
+            st.metric("APY", f"{y_apy:.2%}")
+            st.caption(f"Diversity: **{y_div:.4f}**")
+
+        with s_col2:
+            st.markdown("<h4 style='color:#2979FF; margin-bottom:0;'>Whale Shield</h4>", unsafe_allow_html=True)
+            st.metric("APY", f"{w_apy:.2%}", delta=f"{(w_apy - y_apy):.2%}")
+            st.caption(f"Diversity: **{w_div:.4f}**")
+
+        with s_col3:
+            st.markdown("<h4 style='color:#E040FB; margin-bottom:0;'>Frontier</h4>", unsafe_allow_html=True)
+            st.metric("APY", f"{f_apy:.2%}", delta=f"{(f_apy - y_apy):.2%}")
+            st.caption(f"Diversity: **{f_div:.4f}**")
+
+        with s_col4:
+            st.markdown("<h4 style='color:#7C4DFF; margin-bottom:0;'>Conc-Adj</h4>", unsafe_allow_html=True)
+            st.metric("APY", f"{c_apy:.2%}", delta=f"{(c_apy - y_apy):.2%}")
+            st.caption(f"Diversity: **{c_div:.4f}**")
+
+        with s_col5:
+            st.markdown("<h4 style='color:#00E676; margin-bottom:0;'>Liquid-Yield</h4>", unsafe_allow_html=True)
+            st.metric("APY", f"{l_apy:.2%}", delta=f"{(l_apy - y_apy):.2%}")
+            st.caption(f"Diversity: **{l_div:.4f}**")
+
+        st.divider()
 
         df_scatter = pd.DataFrame(res_data['attempts'])
+        # --- [SECTION END: CONTINUE TO CHARTS] ---
         
         # Updated Color Mapping
         STRAT_DOMAIN = ['Best Yield', 'Whale Shield', 'Frontier', 'Conc-Adj', 'Liquid-Yield']
