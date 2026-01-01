@@ -204,7 +204,8 @@ class RebalanceOptimizer:
         self.hurdle_rate = hurdle_rate_pct / 100.0
         self.yield_trace = []    
         self.frontier_trace = [] 
-        self.car_trace = []      
+        self.car_trace = []
+        self.liquid_trace = []  # NEW: Trace for Liquidity Strategy
         self.all_attempts = []   
         self.current_phase = "Initializing"
         self.start_time = time.time()
@@ -217,15 +218,12 @@ class RebalanceOptimizer:
         multiplier = 10**decimals
 
         # 2. Determine "World Without User" (Base State)
-        # We assume the current API data includes the user's existing funds.
-        # We strip them out to find the "Base Supply".
         user_existing_usd = market.get('existing_balance_usd', 0.0)
         user_existing_wei = (user_existing_usd / token_price) * multiplier
         
         current_total_supply_wei = market['raw_supply']
         
         # Base Supply = Total Supply - User's Current Holdings
-        # (Use max to prevent negative supply due to tiny rounding errors)
         base_supply_wei = max(0, current_total_supply_wei - user_existing_wei)
         
         # 3. Add "New" Allocation
@@ -236,8 +234,6 @@ class RebalanceOptimizer:
         if simulated_total_supply_wei <= 0: 
             return 0.0
         
-        # Borrow remains constant (assuming user is only a supplier)
-        # Utilization = Borrow / (Base + New User Funds)
         new_util = market['raw_borrow'] / simulated_total_supply_wei
         
         new_mult = compute_curve_multiplier(new_util)
@@ -247,11 +243,9 @@ class RebalanceOptimizer:
         return rate_per_second_to_apy(new_supply_rate)
 
     def _get_normalized_allocations(self, x):
-        # Ensure no negative values from solver noise
         x = np.maximum(x, 0)
         sum_x = np.sum(x)
         if sum_x == 0: return x 
-        # Scale to match exact budget
         return x * (self.total_budget / sum_x)
 
     def _calculate_metrics(self, x):
@@ -260,7 +254,6 @@ class RebalanceOptimizer:
         
         total_yield = 0
         for i, alloc in enumerate(normalized_x):
-            # simulate_apy handles the "dilution" logic internally
             total_yield += (alloc * self.simulate_apy(self.markets[i], alloc))
             
         hhi = np.sum(weights**2)
@@ -289,96 +282,83 @@ class RebalanceOptimizer:
     def objective_frontier(self, x):
         norm_x, y_val, div_val, car_val = self._calculate_metrics(x)
         self._record_attempt(y_val, div_val)
-        self.frontier_trace.append(y_val)
+        self.frontier_trace.append(y_val) # Track yield for chart consistency
         return -(y_val * div_val) 
 
     def objective_car(self, x):
         norm_x, y_val, div_val, car_val = self._calculate_metrics(x)
         self._record_attempt(y_val, div_val)
-        self.car_trace.append(y_val)
+        self.car_trace.append(y_val) # Track yield for chart consistency
         return -car_val
+
+    def objective_liquidity(self, x):
+        # 1. Standard Metrics
+        norm_x, y_val, div_val, car_val = self._calculate_metrics(x)
+        self._record_attempt(y_val, div_val)
+        self.liquid_trace.append(y_val) # Track yield for chart consistency
+
+        # 2. Calculate Liquidity Weighted Score
+        # Score = Sum( Alloc * Yield * Log10(Available_Liquidity) )
+        liq_score = 0
+        for i, alloc in enumerate(norm_x):
+            if alloc > 1.0: # Only score if meaningful allocation
+                market = self.markets[i]
+                # Use current APY simulation
+                sim_apy = self.simulate_apy(market, alloc)
+                
+                # Get Liquidity (Static Snapshot)
+                avail_liq = market.get('Available Liquidity (USD)', 0.0)
+                
+                # Log Weighting: dampen the effect of massive pools so they don't drown out everything
+                # Add 10 to ensure log is > 1 for very small amounts, avoiding negatives
+                weight = math.log10(max(10.0, avail_liq)) 
+                
+                liq_score += (alloc * sim_apy * weight)
+        
+        return -liq_score
 
     def optimize(self):
         n = len(self.markets)
-        if n == 0: return None, None, None
+        if n == 0: return None, None, None, None
         
-        # --- 1. Define Bounds (Liquidity Constraints) ---
+        # --- 1. Define Bounds ---
         bounds = []
         for m in self.markets:
-            # Calculate Available Liquidity in USD
-            raw_supply = m.get('raw_supply', 0)
-            raw_borrow = m.get('raw_borrow', 0)
+            available_liq_tokens = max(0, m.get('raw_supply', 0) - m.get('raw_borrow', 0))
             price = m.get('Price USD', 0)
             decimals = m.get('Decimals', 18)
+            available_liq_usd = (available_liq_tokens / (10**decimals)) * price if price > 0 else 0.0
             
-            # Liquidity available for WITHDRAWAL
-            # (If we withdraw, we reduce supply, but we can't withdraw more than we have)
-            # Actually, the optimizer is choosing a *Target Position*.
-            # The only hard constraint is: Target >= 0
-            # AND Target <= Liquidity Cap? No, user can supply as much as they want (up to budget).
-            # The *real* constraint is on the downside: We can't withdraw what we don't have.
-            # But since we are solving for "Target Allocation", the implicit bound is just 0 to Budget.
-            
-            # Wait, there is a nuance: If the POOL has limited liquidity, we can't withdraw? 
-            # No, if we supplied it, we can withdraw it (unless bad debt, which we assume away here).
-            # The only limit is we can't sell more than we own.
-            # Since the optimizer sets the absolute "Target Balance", the lower bound is simply 0.
-            
-            # HOWEVER: The previous logic had a check for `current_balance - available_liq`.
-            # This is only relevant if you want to *force* the user to stay in a pool because it's illiquid.
-            # For a pure optimizer, we assume we *can* move funds. 
-            # If you want to be safe, we keep the previous logic:
-            
-            available_liq_tokens = max(0, raw_supply - raw_borrow)
-            if price > 0:
-                available_liq_usd = (available_liq_tokens / (10**decimals)) * price
-            else:
-                available_liq_usd = 0.0
-
             current_balance = m.get('existing_balance_usd', 0.0)
-            
-            # Prevent withdrawing from a utilization > 100% pool (optional safety)
-            # If Util > 100%, Available Liquidity is 0. 
-            # Lower bound = Current Balance - 0 = Current Balance (Locked).
-            lower_bound = max(0.0, current_balance - available_liq_usd)
-            
-            bounds.append((lower_bound, self.total_budget))
+            # Lower bound is 0 (we can withdraw everything)
+            bounds.append((0.0, self.total_budget))
 
-        # --- 2. Initial Guess (COLD START) ---
-        # Crucial Change: We do NOT use the current portfolio.
-        # We start with an Equal Weight distribution.
-        # This acts as a "Fresh Look" at the markets.
+        # --- 2. Initial Guess (Equal Weight) ---
         x0 = np.full(n, self.total_budget / n)
 
         # --- 3. Budget Constraint ---
         constraints = ({'type': 'eq', 'fun': lambda x: np.sum(x) - self.total_budget})
 
         # --- 4. Run SLSQP Solvers ---
-        # Precision solver. Since we stripped the "User Memory" in simulate_apy,
-        # and we use an Equal Weight start, it will "Water Fill" the pools correctly.
-        
+        options = {'maxiter': 5000, 'ftol': 1e-6}
+
         # A. Best Yield
-        res_yield = minimize(
-            self.objective_yield, x0, method='SLSQP', bounds=bounds, constraints=constraints,
-            tol=1e-6, options={'maxiter': 10000}
-        )
+        res_yield = minimize(self.objective_yield, x0, method='SLSQP', bounds=bounds, constraints=constraints, tol=1e-6, options=options)
         best_yield_alloc = self._get_normalized_allocations(res_yield.x)
 
         # B. Frontier
-        res_frontier = minimize(
-            self.objective_frontier, x0, method='SLSQP', bounds=bounds, constraints=constraints,
-            tol=1e-6, options={'maxiter': 10000}
-        )
+        res_frontier = minimize(self.objective_frontier, x0, method='SLSQP', bounds=bounds, constraints=constraints, tol=1e-6, options=options)
         best_frontier_alloc = self._get_normalized_allocations(res_frontier.x)
 
         # C. Concentration-Adj Return
-        res_car = minimize(
-            self.objective_car, x0, method='SLSQP', bounds=bounds, constraints=constraints,
-            tol=1e-6, options={'maxiter': 10000}
-        )
+        res_car = minimize(self.objective_car, x0, method='SLSQP', bounds=bounds, constraints=constraints, tol=1e-6, options=options)
         best_car_alloc = self._get_normalized_allocations(res_car.x)
         
-        return best_yield_alloc, best_frontier_alloc, best_car_alloc
+        # D. Liquidity Weighted (NEW)
+        res_liq = minimize(self.objective_liquidity, x0, method='SLSQP', bounds=bounds, constraints=constraints, tol=1e-6, options=options)
+        best_liquid_alloc = self._get_normalized_allocations(res_liq.x)
+        
+        return best_yield_alloc, best_frontier_alloc, best_car_alloc, best_liquid_alloc
     
 # ==========================================
 # 4. STREAMLIT UI
@@ -572,6 +552,7 @@ if not df_selected.empty:
             st.caption("Maximizes `Yield * Diversity`. Finds the sweet spot where you get good yield without putting all eggs in one basket.")
 
     # --- BUTTON TO RUN AND SAVE TO STATE ---
+    # --- BUTTON TO RUN AND SAVE TO STATE ---
     if st.button("🚀 Run Optimization", type="primary", width='stretch'):
         market_data_list = fetch_live_market_details(df_selected)
         for m in market_data_list:
@@ -584,22 +565,23 @@ if not df_selected.empty:
         # Run Optimizer
         opt = RebalanceOptimizer(total_optimizable, market_data_list, hurdle_rate)
         
-        # RETURNS 3 DISTINCT SOLVED PORTFOLIOS (RAW)
-        raw_yield_alloc, raw_frontier_alloc, raw_car_alloc = opt.optimize()
+        # FIX: Unpack 4 values instead of 3
+        raw_yield_alloc, raw_frontier_alloc, raw_car_alloc, raw_liquid_alloc = opt.optimize()
 
         # APPLY POST-OPTIMIZATION CLEANING (THRESHOLD FILTER)
-        # This ensures charts and metrics align with the table below
         cleaned_yield_alloc = filter_small_moves(raw_yield_alloc, market_data_list, min_move_thresh)
         cleaned_frontier_alloc = filter_small_moves(raw_frontier_alloc, market_data_list, min_move_thresh)
         cleaned_car_alloc = filter_small_moves(raw_car_alloc, market_data_list, min_move_thresh)
+        cleaned_liquid_alloc = filter_small_moves(raw_liquid_alloc, market_data_list, min_move_thresh)
         
-        # Save results to session state to prevent reset on interaction
+        # Save results to session state
         st.session_state['opt_results'] = {
             'market_data_list': market_data_list,
             'opt_object': opt,
-            'best_yield_alloc': cleaned_yield_alloc,    # Using CLEANED
-            'frontier_alloc': cleaned_frontier_alloc,   # Using CLEANED
-            'car_alloc': cleaned_car_alloc,             # Using CLEANED
+            'best_yield_alloc': cleaned_yield_alloc,
+            'frontier_alloc': cleaned_frontier_alloc,
+            'car_alloc': cleaned_car_alloc,
+            'liquid_alloc': cleaned_liquid_alloc,
             'current_metrics': {
                 'annual_interest': current_annual_interest,
                 'blended_apy': current_blended_apy
@@ -607,7 +589,8 @@ if not df_selected.empty:
             'traces': {
                 'yield': opt.yield_trace,
                 'frontier': opt.frontier_trace,
-                'car': opt.car_trace
+                'car': opt.car_trace,
+                'liquid': opt.liquid_trace
             },
             'attempts': opt.all_attempts
         }
@@ -619,11 +602,12 @@ if not df_selected.empty:
         
         # Load from State
         res_data = st.session_state['opt_results']
-        opt = res_data['opt_object'] # NOTE: This object is stale but methods work if stateless
+        opt = res_data['opt_object'] 
         market_data_list = res_data['market_data_list']
         best_yield_alloc = res_data['best_yield_alloc']
         frontier_alloc = res_data['frontier_alloc']
         car_alloc = res_data['car_alloc']
+        liquid_alloc = res_data['liquid_alloc'] # NEW
         
         # Helper to calc point stats for chart
         def get_stats(alloc):
@@ -637,33 +621,28 @@ if not df_selected.empty:
         y_abs, y_apy, y_div = get_stats(best_yield_alloc)
         f_abs, f_apy, f_div = get_stats(frontier_alloc)
         c_abs, c_apy, c_div = get_stats(car_alloc)
+        l_abs, l_apy, l_div = get_stats(liquid_alloc) # NEW
 
         # Prepare Scatter Data
         df_scatter = pd.DataFrame(res_data['attempts'])
         
-        highlights = pd.DataFrame([
-            {"Diversity Score": y_div, "Blended APY": y_apy, "Type": "Best Yield", "Size": 100, "Color": "#F44336"},
-            {"Diversity Score": f_div, "Blended APY": f_apy, "Type": "Frontier", "Size": 100, "Color": "#E040FB"}, # Magenta
-            {"Diversity Score": c_div, "Blended APY": c_apy, "Type": "Concentration-Adj", "Size": 100, "Color": "#7C4DFF"} # Purple
-        ])
+        # Consistent Color Mapping for all charts
+        STRAT_DOMAIN = ['Best Yield', 'Frontier', 'Conc-Adj', 'Liquid-Yield']
+        STRAT_RANGE = ['#F44336', '#E040FB', '#7C4DFF', '#00E676'] # Red, Magenta, Purple, Bright Green
         
         # --- CHART SECTION ---
         st.subheader("📊 Optimization Search Space")
         col_graph1, col_graph2 = st.columns(2)
         
-        # Consistent Color Mapping for all charts
-        STRAT_DOMAIN = ['Best Yield', 'Frontier', 'Conc-Adj']
-        STRAT_RANGE = ['#F44336', '#E040FB', '#7C4DFF'] # Red, Magenta, Purple
-
         # 1. SCATTER PLOT
         with col_graph1:
             st.markdown("**Efficiency Frontier**")
             
-            # Use consistent names in highlights to match domain
             highlights = pd.DataFrame([
                 {"Diversity Score": y_div, "Blended APY": y_apy, "Type": "Best Yield", "Size": 100},
                 {"Diversity Score": f_div, "Blended APY": f_apy, "Type": "Frontier", "Size": 100},
-                {"Diversity Score": c_div, "Blended APY": c_apy, "Type": "Conc-Adj", "Size": 100}
+                {"Diversity Score": c_div, "Blended APY": c_apy, "Type": "Conc-Adj", "Size": 100},
+                {"Diversity Score": l_div, "Blended APY": l_apy, "Type": "Liquid-Yield", "Size": 100}
             ])
             
             base = alt.Chart(df_scatter).mark_circle(opacity=0.3, color='#80DEEA').encode(
@@ -680,7 +659,7 @@ if not df_selected.empty:
             )
             
             st.altair_chart(base + points, width='stretch')
-            st.caption("Purple Point represents the best Risk-Adjusted return based on Concentration.")
+            st.caption("Green Point favors depth + yield. Purple Point favors risk-adjusted returns.")
 
         # 2. LINE CHART (CONVERGENCE)
         with col_graph2:
@@ -688,12 +667,12 @@ if not df_selected.empty:
             
             traces = res_data['traces']
             
-            # Map trace keys to clean Strategy names that match STRAT_DOMAIN
             d1 = pd.DataFrame({"Iteration": range(len(traces['yield'])), "Value": traces['yield'], "Strategy": "Best Yield"})
             d2 = pd.DataFrame({"Iteration": range(len(traces['frontier'])), "Value": traces['frontier'], "Strategy": "Frontier"})
             d3 = pd.DataFrame({"Iteration": range(len(traces['car'])), "Value": traces['car'], "Strategy": "Conc-Adj"})
+            d4 = pd.DataFrame({"Iteration": range(len(traces['liquid'])), "Value": traces['liquid'], "Strategy": "Liquid-Yield"})
             
-            df_hist_long = pd.concat([d1, d2, d3])
+            df_hist_long = pd.concat([d1, d2, d3, d4])
             
             line_chart = alt.Chart(df_hist_long).mark_line().encode(
                 x='Iteration',
@@ -706,44 +685,32 @@ if not df_selected.empty:
         st.divider()
         st.markdown("**Allocation Comparison (All Strategies)**")
         
-        # Construct long-format DF for Grouped Bar Chart
         bar_data = []
         for idx, m in enumerate(market_data_list):
             m_name = f"{m['Loan Token']}/{m['Collateral']}"
             
-            # Data for the three strategies
             y_val = best_yield_alloc[idx]
             f_val = frontier_alloc[idx]
             c_val = car_alloc[idx]
+            l_val = liquid_alloc[idx]
             
             # Only include market if at least one strategy allocates more than $1
-            if y_val > 1 or f_val > 1 or c_val > 1:
+            if max(y_val, f_val, c_val, l_val) > 1:
                 bar_data.append({"Market": m_name, "Strategy": "Best Yield", "Alloc ($)": y_val})
                 bar_data.append({"Market": m_name, "Strategy": "Frontier", "Alloc ($)": f_val})
                 bar_data.append({"Market": m_name, "Strategy": "Conc-Adj", "Alloc ($)": c_val})
+                bar_data.append({"Market": m_name, "Strategy": "Liquid-Yield", "Alloc ($)": l_val})
             
         if bar_data:
             df_bar = pd.DataFrame(bar_data)
             
-            # Using xOffset for side-by-side grouping instead of faceted columns
             bar_chart = alt.Chart(df_bar).mark_bar().encode(
-                x=alt.X('Market:N', 
-                        title="Market Pair",
-                        axis=alt.Axis(labelAngle=-45)),
-                y=alt.Y('Alloc ($):Q', 
-                        title="Allocation (USD)",
-                        scale=alt.Scale(zero=True)),
+                x=alt.X('Market:N', title="Market Pair", axis=alt.Axis(labelAngle=-45)),
+                y=alt.Y('Alloc ($):Q', title="Allocation (USD)", scale=alt.Scale(zero=True)),
                 xOffset='Strategy:N',
-                color=alt.Color('Strategy:N', scale=alt.Scale(
-                    domain=['Best Yield', 'Frontier', 'Conc-Adj'],
-                    range=['#F44336', '#E040FB', '#7C4DFF']
-                )),
+                color=alt.Color('Strategy:N', scale=alt.Scale(domain=STRAT_DOMAIN, range=STRAT_RANGE)),
                 tooltip=['Market', 'Strategy', alt.Tooltip('Alloc ($)', format='$,.2f')]
-            ).properties(
-                height=400
-            ).configure_view(
-                stroke=None
-            )
+            ).properties(height=400).configure_view(stroke=None)
             
             st.altair_chart(bar_chart, width='stretch')
         else:
@@ -756,7 +723,12 @@ if not df_selected.empty:
 
         strategy_choice = st.radio(
             "View Details For:",
-            ["Best Yield (Red)", "Frontier / Diversified (Magenta)", "Concentration-Adj (Purple)"],
+            [
+                "Best Yield (Red)", 
+                "Frontier / Diversified (Magenta)", 
+                "Concentration-Adj (Purple)",
+                "Liquid-Yield (Green)"
+            ],
             horizontal=True
         )
         
@@ -764,8 +736,10 @@ if not df_selected.empty:
             final_alloc = best_yield_alloc
         elif "Frontier" in strategy_choice:
             final_alloc = frontier_alloc
-        else:
+        elif "Concentration" in strategy_choice:
             final_alloc = car_alloc
+        else:
+            final_alloc = liquid_alloc # Liquid-Yield
 
         # --- UPDATED LOGIC (SIMPLIFIED) ---
         results = []
@@ -774,16 +748,9 @@ if not df_selected.empty:
         for i, target_val in enumerate(final_alloc):
             m = market_data_list[i]
             
-            # Calculate raw difference 
-            # Note: final_alloc is ALREADY clean (filtered), so if diff < threshold,
-            # it has already been set to 0.0 effectively in the cleaning step.
-            
             net_move = target_val - m['existing_balance_usd']
             
-            # --- FIX: Floating Point Drift Prevention ---
-            # If the optimizer suggests holding (no significant move), 
-            # we trust the API's current APY to be the "Truth".
-            # This prevents 4.0000% becoming 4.0001% due to float math on huge numbers.
+            # FIX: Floating Point Drift Prevention
             if abs(net_move) < 0.01:
                 new_apy = m['current_supply_apy']
             else:
@@ -815,10 +782,6 @@ if not df_selected.empty:
         df_res = pd.DataFrame(results)
         
         # Add % Contributing to APY Column
-        total_gen_yield = df_res["Annual $ Yield"].sum()
-        df_res = pd.DataFrame(results)
-        
-        # Add % Contributing to APY Column
         if total_optimizable > 0:
             df_res["% Contributing to APY"] = (df_res["Target ($)"] / total_optimizable) * df_res["New APY"]
         else:
@@ -828,10 +791,9 @@ if not df_selected.empty:
         current_ann = res_data['current_metrics']['annual_interest']
         new_blended_apy = new_annual_interest / total_optimizable if total_optimizable > 0 else 0.0
         
-# --- 1. Financial Summary Metrics (UPDATED LABELS) ---
+        # --- 1. Financial Summary Metrics ---
         st.subheader("Optimization Summary")
 
-        # Calculate differences for deltas
         apy_diff = new_blended_apy - current_blended
         interest_diff = new_annual_interest - current_ann
 
@@ -840,35 +802,11 @@ if not df_selected.empty:
         selected_diversity = 1.0 - np.sum(selected_weights**2)
 
         m1, m2, m3, m4, m5 = st.columns(5) 
-        m1.metric(
-            "Current APY", 
-            f"{current_blended:.4%}",
-            help="Weighted APY of existing balances only"
-        )
-        m2.metric(
-            "Optimized APY", 
-            f"{new_blended_apy:.4%}", 
-            delta=f"{apy_diff*100:.3f}%",
-            help="Projected APY after rebalancing/deploying capital"
-        )
-        m3.metric(
-            "Total Wealth (After 1 Yr)", 
-            f"${total_optimizable + new_annual_interest:,.2f}",
-            help="Principal plus projected annual interest"
-        )
-
-        m4.metric(
-            "Additional Annual Gain After Optimization", 
-            f"${interest_diff:,.2f}",
-            delta_color="normal",
-            help="Extra annual interest earned compared to current setup"
-        )
-
-        m5.metric(
-            "Diversity Score", 
-            f"{selected_diversity:.4f}",
-            help="1.0 is perfectly diversified, closer to 0 is concentrated"
-        )
+        m1.metric("Current APY", f"{current_blended:.4%}")
+        m2.metric("Optimized APY", f"{new_blended_apy:.4%}", delta=f"{apy_diff*100:.3f}%")
+        m3.metric("Total Wealth (After 1 Yr)", f"${total_optimizable + new_annual_interest:,.2f}")
+        m4.metric("Additional Annual Gain", f"${interest_diff:,.2f}")
+        m5.metric("Diversity Score", f"{selected_diversity:.4f}")
         
         st.caption(f"**Diversity Index:** {selected_diversity:.4f} (1.0 is perfectly diversified, closer to 0 is concentrated.)")
         
@@ -881,7 +819,7 @@ if not df_selected.empty:
         r2_c4.metric("Daily", f"${new_annual_interest/365:,.2f}")
         r2_c5.metric("Hourly", f"${new_annual_interest/8760:,.4f}")
 
-        # 3. Sorted Dataframe with Column Ordering
+        # 3. Sorted Dataframe
         df_res = df_res.sort_values(by=["Suggested Action", "Portfolio Weight"], ascending=[False, False])
 
         st.dataframe(
@@ -909,14 +847,10 @@ if not df_selected.empty:
         # ==========================================
         st.divider()
         st.subheader("📋 Rebalancing Actions (Step-by-Step)")
-        st.caption("Explicit instructions on how to move funds. 'Destination Final Balance' updates cumulatively.")
+        st.caption("Explicit instructions on how to move funds.")
 
-        # --- PREPARE DATA FOR MATCHING ALGORITHM ---
-        
-        # 1. Identify Sources (Where money comes from)
+        # 1. Identify Sources
         sources = []
-        
-        # A. From Withdrawals
         withdraw_df = df_res[df_res["Net Move ($)"] < -0.01]
         for _, row in withdraw_df.iterrows():
             sources.append({
@@ -925,43 +859,29 @@ if not df_selected.empty:
                 "type": "Market"
             })
             
-        # B. From New Cash
         if new_cash > 0.01:
-            sources.append({
-                "name": "New Capital (Wallet)",
-                "available": new_cash,
-                "type": "Wallet"
-            })
+            sources.append({ "name": "New Capital (Wallet)", "available": new_cash, "type": "Wallet" })
             
-        # 2. Identify Destinations (Where money goes)
+        # 2. Identify Destinations
         destinations = []
         deposit_df = df_res[df_res["Net Move ($)"] > 0.01]
         for _, row in deposit_df.iterrows():
             destinations.append({
                 "name": row['Market'],
                 "needed": row['Net Move ($)'],
-                # Start with CURRENT balance, not target. 
-                # We will increment this as we fill it to show the cumulative effect.
                 "running_balance": row['Current ($)'] 
             })
 
         # --- GREEDY MATCHING ALGORITHM ---
         transfer_steps = []
-        
-        src_idx = 0
-        dst_idx = 0
+        src_idx, dst_idx = 0, 0
         
         while src_idx < len(sources) and dst_idx < len(destinations):
-            src = sources[src_idx]
-            dst = destinations[dst_idx]
-            
-            # Determine how much can be moved in this specific pairing
+            src, dst = sources[src_idx], destinations[dst_idx]
             amount_to_move = min(src['available'], dst['needed'])
             
-            if amount_to_move > 0.01: # Filter dust
-                # Increment the running balance for the destination
+            if amount_to_move > 0.01: 
                 dst['running_balance'] += amount_to_move
-                
                 transfer_steps.append({
                     "From (Source)": src['name'],
                     "To (Destination)": dst['name'],
@@ -969,37 +889,20 @@ if not df_selected.empty:
                     "Destination Final Balance ($)": dst['running_balance']
                 })
             
-            # Update availability/needs
             src['available'] -= amount_to_move
             dst['needed'] -= amount_to_move
             
-            # Move indices if exhausted/filled
-            if src['available'] < 0.01:
-                src_idx += 1
-            if dst['needed'] < 0.01:
-                dst_idx += 1
+            if src['available'] < 0.01: src_idx += 1
+            if dst['needed'] < 0.01: dst_idx += 1
 
-        # --- DISPLAY RESULTS ---
         if transfer_steps:
             df_actions = pd.DataFrame(transfer_steps)
-            
-            # Add Step Number Column
             df_actions.insert(0, "Step", range(1, len(df_actions) + 1))
-            
             st.info(f"Generated {len(transfer_steps)} specific transfer actions to rebalance the portfolio.")
-            
-            st.dataframe(
-                df_actions.style.format({
-                    "Transfer Amount ($)": "${:,.2f}",
-                    "Destination Final Balance ($)": "${:,.2f}"
-                }),
-                width='stretch',
-                hide_index=True
-            )
+            st.dataframe(df_actions.style.format({"Transfer Amount ($)": "${:,.2f}", "Destination Final Balance ($)": "${:,.2f}"}), width='stretch', hide_index=True)
         else:
             st.success("✅ Portfolio is already optimized. No actions needed.")
 
-        # Sanity warning if math doesn't perfectly zero out
         remaining_src = sum(s['available'] for s in sources)
         remaining_dst = sum(d['needed'] for d in destinations)
         if remaining_src > 1.0 or remaining_dst > 1.0:
