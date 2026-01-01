@@ -870,6 +870,19 @@ if not df_selected.empty:
         m3.metric("Total Wealth (1 Yr)", f"${total_optimizable + new_annual_interest:,.2f}")
         m4.metric("Gain vs Current", f"${interest_diff:,.2f}")
         m5.metric("Diversity Score", f"{selected_diversity:.4f}")
+
+        # Row 2: Time-Based Earnings Breakdown (Restored)
+        st.markdown("---")
+        st.caption("📅 Projected Earnings Breakdown (based on new allocation)")
+        
+        t1, t2, t3, t4, t5 = st.columns(5)
+        t1.metric("Annual", f"${new_annual_interest:,.2f}")
+        t2.metric("Monthly", f"${new_annual_interest/12:,.2f}")
+        t3.metric("Weekly", f"${new_annual_interest/52:,.2f}")
+        t4.metric("Daily", f"${new_annual_interest/365:,.2f}")
+        t5.metric("Hourly", f"${new_annual_interest/8760:,.4f}")
+
+        st.divider()
         
         df_res = df_res.sort_values(by=["Action", "Weight"], ascending=[False, False])
 
