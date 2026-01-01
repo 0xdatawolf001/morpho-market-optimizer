@@ -202,17 +202,19 @@ def fetch_live_market_details(selected_df):
 # ==========================================
 
 class RebalanceOptimizer:
-    def __init__(self, total_budget, market_list, hurdle_rate_pct, max_dominance_pct=100.0):
+    def __init__(self, total_budget, market_list, hurdle_rate_pct, max_dominance_pct=100.0, allow_overflow=False):
         self.total_budget = total_budget 
         self.markets = market_list
         self.hurdle_rate = hurdle_rate_pct / 100.0
-        self.max_dominance_ratio = max_dominance_pct / 100.0 # e.g. 10% -> 0.10
+        self.max_dominance_ratio = max_dominance_pct / 100.0 
+        self.allow_overflow = allow_overflow # NEW
         
         self.yield_trace = []    
         self.frontier_trace = [] 
         self.car_trace = []
         self.liquid_trace = []
-        self.whale_trace = []   # NEW: Trace for Whale Shield
+        self.whale_trace = []
+        self.whale_warning = None # NEW: Store warning state
         
         self.all_attempts = []   
 
@@ -315,7 +317,6 @@ class RebalanceOptimizer:
         return -liq_score
 
     def objective_whale(self, x):
-        """Identical to Yield, but used with stricter bounds in the solver."""
         norm_x, y_val, div_val, car_val = self._calculate_metrics(x)
         self._record_attempt(y_val, div_val)
         self.whale_trace.append(y_val)
@@ -330,8 +331,7 @@ class RebalanceOptimizer:
         whale_bounds = []
         
         # Calculate bounds for "Whale Shield"
-        # Formula: Alloc <= BaseSupply * (Target% / (1 - Target%))
-        # Logic: NewTotal = Base + Alloc. We want Alloc / NewTotal <= Target%
+        # Formula: Alloc <= BaseAvailable * (Target% / (1 - Target%))
         if self.max_dominance_ratio >= 0.99:
             cap_factor = float('inf')
         else:
@@ -341,21 +341,47 @@ class RebalanceOptimizer:
             # Standard Bound (Budget only)
             standard_bounds.append((0.0, self.total_budget))
             
-            # Whale Bound
+            # Whale Bound (Available Liquidity)
             token_price = m.get('Price USD', 0)
             multiplier = 10**m.get('Decimals', 18)
             user_existing_usd = m.get('existing_balance_usd', 0.0)
             user_existing_wei = (user_existing_usd / token_price) * multiplier if token_price > 0 else 0
             
             total_supply_wei = m.get('raw_supply', 0)
-            base_supply_wei = max(0, total_supply_wei - user_existing_wei)
-            base_supply_usd = (base_supply_wei / multiplier) * token_price if token_price > 0 else 0
+            total_borrow_wei = m.get('raw_borrow', 0)
+            
+            # Available Liquidity = Supply - Borrow
+            current_available_wei = max(0, total_supply_wei - total_borrow_wei)
+            
+            # Base Available = Current Liquidity - User's Current Liquidity
+            base_available_wei = max(0, current_available_wei - user_existing_wei)
+            
+            base_available_usd = (base_available_wei / multiplier) * token_price if token_price > 0 else 0
             
             # Cap Calculation
-            strict_cap = base_supply_usd * cap_factor
+            strict_cap = base_available_usd * cap_factor
             
             # Bound is min of Budget or Strict Cap
             whale_bounds.append((0.0, min(self.total_budget, strict_cap)))
+
+        # --- Check for Whale Overflow ---
+        total_whale_capacity = sum([b[1] for b in whale_bounds])
+        
+        if total_whale_capacity < self.total_budget:
+            if self.allow_overflow:
+                # User allows ignoring the shield constraint if needed
+                self.whale_warning = (
+                    f"⚠️ **Shield Ignored:** Total Budget (${self.total_budget:,.0f}) exceeds the strictly safe liquidity capacity "
+                    f"(${total_whale_capacity:,.0f}). Optimization reverted to standard bounds for the Whale Strategy."
+                )
+                whale_bounds = standard_bounds
+            else:
+                # User enforces the shield. 
+                # Note: SLSQP with Equality Constraint (Sum = Budget) will likely FAIL or return partials if bounds are too tight.
+                self.whale_warning = (
+                    f"⚠️ **Liquidity Capped:** Total Budget (${self.total_budget:,.0f}) exceeds the safe liquidity capacity "
+                    f"(${total_whale_capacity:,.0f}). The solver may fail to allocate the full budget."
+                )
 
         # --- 2. Setup Solver ---
         x0 = np.full(n, self.total_budget / n)
@@ -378,11 +404,17 @@ class RebalanceOptimizer:
         res_liq = minimize(self.objective_liquidity, x0, method='SLSQP', bounds=standard_bounds, constraints=constraints, tol=1e-6, options=options)
         best_liquid_alloc = self._get_normalized_allocations(res_liq.x)
         
-        # E. Whale Shield (NEW)
-        # Note: If budget > sum of all caps, this will fail or return a poor result. 
-        # We rely on SLSQP best-effort or the user having enough valid markets.
+        # E. Whale Shield
+        # If allow_overflow=True and capacity is hit, whale_bounds is now just standard_bounds
         res_whale = minimize(self.objective_whale, x0, method='SLSQP', bounds=whale_bounds, constraints=constraints, tol=1e-6, options=options)
-        best_whale_alloc = self._get_normalized_allocations(res_whale.x)
+        
+        # If the solver "failed" (likely due to strict bounds vs budget equality), we still try to get the allocation
+        # But we don't normalize it to the budget if it physically couldn't fit.
+        if not self.allow_overflow and total_whale_capacity < self.total_budget:
+             # Strict mode: Take raw X. If sum(X) < Budget, that implies "Unallocated Cash".
+             best_whale_alloc = np.maximum(res_whale.x, 0)
+        else:
+             best_whale_alloc = self._get_normalized_allocations(res_whale.x)
         
         return best_yield_alloc, best_frontier_alloc, best_car_alloc, best_liquid_alloc, best_whale_alloc
     
@@ -475,7 +507,7 @@ with col_scope:
     raw_ids = st.text_area(
         "Paste Market IDs or Monarch links (one per line)", 
         value="", 
-        height=235,
+        height=355,
         placeholder="Market IDs or Links..."
     )
     clean_ids = []
@@ -507,13 +539,19 @@ with col_param:
         max_value=100.0,
         value=100.0,
         step=5.0,
-        help="Hard limit: You will never own more than this % of a market's total supply. Set to 100% to disable."
+        help="Hard limit: You will never own more than this % of a market's AVAILABLE liquidity (Supply - Borrow). Set to 100% to disable."
     )
 
     min_move_thresh = st.number_input(
         "Min Rebalance Threshold ($)", 
         value=0.0, 
         step=50.0
+    )
+
+    allow_break = st.checkbox(
+        "Allow Whale Shield Overflow?",
+        value=False,
+        help="If your Budget > Safe Liquidity Limits, allow the optimizer to ignore the limits (unsafe) to ensure all money is invested. If unchecked, it will leave cash unallocated."
     )
 
 if not df_selected.empty:
@@ -575,8 +613,8 @@ if not df_selected.empty:
             st.markdown("🔵 **Whale Shield**")
             st.caption(
                 f"**Protective.** Maximizes yield but adds a hard constraint: "
-                f"You will never own more than **{max_dominance}%** of a pool's supply. "
-                "Prevents you from getting stuck in illiquid markets."
+                f"You will never own more than **{max_dominance}%** of a pool's **Available Liquidity**. "
+                "Prevents you from getting stuck in markets with high Total Supply but 0 withdrawals available."
             )
             
         with col_info3:
@@ -608,8 +646,8 @@ if not df_selected.empty:
         current_annual_interest = sum(m['existing_balance_usd'] * m['current_supply_apy'] for m in market_data_list)
         current_blended_apy = current_annual_interest / current_wealth if current_wealth > 0 else 0.0
 
-        # Pass max_dominance to Optimizer
-        opt = RebalanceOptimizer(total_optimizable, market_data_list, hurdle_rate, max_dominance)
+        # Pass max_dominance and allow_overflow to Optimizer
+        opt = RebalanceOptimizer(total_optimizable, market_data_list, hurdle_rate, max_dominance, allow_break)
         
         # Unpack 5 results
         r_yield, r_frontier, r_car, r_liquid, r_whale = opt.optimize()
@@ -772,6 +810,11 @@ if not df_selected.empty:
         
         if "Best Yield" in strategy_choice:
             final_alloc = best_yield_alloc
+        elif "Whale" in strategy_choice:
+            final_alloc = whale_alloc
+            # Check for specific Whale Shield warnings
+            if hasattr(res_data['opt_object'], 'whale_warning') and res_data['opt_object'].whale_warning:
+                st.warning(res_data['opt_object'].whale_warning)
         elif "Whale" in strategy_choice:
             final_alloc = whale_alloc
         elif "Frontier" in strategy_choice:
