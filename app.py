@@ -651,9 +651,20 @@ if not df_selected.empty:
         st.subheader("📊 Optimization Search Space")
         col_graph1, col_graph2 = st.columns(2)
         
+        # Consistent Color Mapping for all charts
+        STRAT_DOMAIN = ['Best Yield', 'Frontier', 'Conc-Adj']
+        STRAT_RANGE = ['#F44336', '#E040FB', '#7C4DFF'] # Red, Magenta, Purple
+
         # 1. SCATTER PLOT
         with col_graph1:
             st.markdown("**Efficiency Frontier**")
+            
+            # Use consistent names in highlights to match domain
+            highlights = pd.DataFrame([
+                {"Diversity Score": y_div, "Blended APY": y_apy, "Type": "Best Yield", "Size": 100},
+                {"Diversity Score": f_div, "Blended APY": f_apy, "Type": "Frontier", "Size": 100},
+                {"Diversity Score": c_div, "Blended APY": c_apy, "Type": "Conc-Adj", "Size": 100}
+            ])
             
             base = alt.Chart(df_scatter).mark_circle(opacity=0.3, color='#80DEEA').encode(
                 x=alt.X('Diversity Score', title='Diversity (1 - HHI)'),
@@ -664,10 +675,7 @@ if not df_selected.empty:
             points = alt.Chart(highlights).mark_circle(size=200, opacity=1.0).encode(
                 x='Diversity Score',
                 y='Blended APY',
-                color=alt.Color('Type', scale=alt.Scale(
-                    domain=['Best Yield', 'Frontier', 'Concentration-Adj'],
-                    range=['#F44336', '#E040FB', '#7C4DFF'] 
-                )),
+                color=alt.Color('Type', scale=alt.Scale(domain=STRAT_DOMAIN, range=STRAT_RANGE)),
                 tooltip=['Type', 'Blended APY', 'Diversity Score']
             )
             
@@ -678,21 +686,19 @@ if not df_selected.empty:
         with col_graph2:
             st.markdown("**Solver Convergence**")
             
-            # Since we now run 3 separate loops, the traces might be different lengths
-            # We will plot them as independent lines
             traces = res_data['traces']
             
-            # Create separate DFs and concat
-            d1 = pd.DataFrame({"Iteration": range(len(traces['yield'])), "Value": traces['yield'], "Strategy": "Best Yield Run"})
-            d2 = pd.DataFrame({"Iteration": range(len(traces['frontier'])), "Value": traces['frontier'], "Strategy": "Frontier Run"})
-            d3 = pd.DataFrame({"Iteration": range(len(traces['car'])), "Value": traces['car'], "Strategy": "Conc-Adj Run"})
+            # Map trace keys to clean Strategy names that match STRAT_DOMAIN
+            d1 = pd.DataFrame({"Iteration": range(len(traces['yield'])), "Value": traces['yield'], "Strategy": "Best Yield"})
+            d2 = pd.DataFrame({"Iteration": range(len(traces['frontier'])), "Value": traces['frontier'], "Strategy": "Frontier"})
+            d3 = pd.DataFrame({"Iteration": range(len(traces['car'])), "Value": traces['car'], "Strategy": "Conc-Adj"})
             
             df_hist_long = pd.concat([d1, d2, d3])
             
             line_chart = alt.Chart(df_hist_long).mark_line().encode(
                 x='Iteration',
                 y=alt.Y('Value', title='Objective Yield ($)'),
-                color=alt.Color('Strategy', scale=alt.Scale(range=['#F44336', '#E040FB', '#7C4DFF']))
+                color=alt.Color('Strategy', scale=alt.Scale(domain=STRAT_DOMAIN, range=STRAT_RANGE))
             )
             st.altair_chart(line_chart, width='stretch')
 
@@ -734,7 +740,7 @@ if not df_selected.empty:
                 )),
                 tooltip=['Market', 'Strategy', alt.Tooltip('Alloc ($)', format='$,.2f')]
             ).properties(
-                height=400  # Fixed height prevents the "squashed" look
+                height=400
             ).configure_view(
                 stroke=None
             )
