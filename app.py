@@ -889,6 +889,7 @@ if not df_selected.empty:
             pct_final_liq = (target_val / final_liq) if final_liq > 0 else 0.0
             
             results.append({
+                "Destination ID": str(m['Market ID'])[:7],
                 "Market": f"{m['Loan Token']}/{m['Collateral']}",
                 "Chain": m['Chain'], 
                 "Action": action,
@@ -901,7 +902,8 @@ if not df_selected.empty:
                 "Ann. Yield": target_val * new_apy,
                 "Initial Liq.": orig_liq,
                 "Final Liq.": final_liq,
-                "% Liq. Share": pct_final_liq
+                "% Liq. Share": pct_final_liq,
+                "Market ID Full": m['Market ID'] # Keep full ID for logic
             })
 
         # --- Check for Unallocated Capital ---
@@ -975,6 +977,7 @@ if not df_selected.empty:
                 "% Liq. Share": "{:.2%}",
                 "Contribution to Portfolio APY": "{:.4%}" 
             }), 
+            column_order=["Destination ID", "Market", "Chain", "Action", "Weight", "Current ($)", "Target ($)", "Net Move ($)", "Current APY", "Simulated APY", "Ann. Yield"],
             width='stretch', 
             hide_index=True
         )
@@ -998,6 +1001,7 @@ if not df_selected.empty:
         deposit_df = df_res[df_res["Net Move ($)"] > 0.01]
         for _, row in deposit_df.iterrows():
             destinations.append({
+                "id": row['Market ID Full'],
                 "name": row['Market'],
                 "needed": row['Net Move ($)'],
                 "running_balance": row['Current ($)'] 
@@ -1013,6 +1017,7 @@ if not df_selected.empty:
             if amount_to_move > 0.01: 
                 dst['running_balance'] += amount_to_move
                 transfer_steps.append({
+                    "Destination ID": str(dst['id'])[:7],
                     "From": src['name'],
                     "To": dst['name'],
                     "Amount ($)": amount_to_move,
