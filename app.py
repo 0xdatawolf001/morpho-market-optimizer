@@ -380,8 +380,8 @@ class RebalanceOptimizer:
                 # User enforces the shield. 
                 # Note: SLSQP with Equality Constraint (Sum = Budget) will likely FAIL or return partials if bounds are too tight.
                 self.whale_warning = (
-                    rf"⚠️ **Liquidity Capped:** Total Budget (\${self.total_budget:,.0f}) exceeds the safe liquidity capacity "
-                    rf"(\${total_whale_capacity:,.0f}). The solver may fail to allocate the full budget."
+                    f"⚠️ **Liquidity Capped:** Total Budget (\${self.total_budget:,.0f}) exceeds the safe liquidity capacity "
+                    f"(\${total_whale_capacity:,.0f}). The solver may fail to allocate the full budget."
                 )
 
         # --- 2. Setup Solver ---
@@ -488,7 +488,6 @@ df_filtered = df_filtered[
 st.dataframe(
     df_filtered, 
     column_config={
-        "Price USD": st.column_config.NumberColumn(format="dollar"),  
         "Total Supply (USD)": st.column_config.NumberColumn(format="dollar"),
         "Total Borrow (USD)": st.column_config.NumberColumn(format="dollar"), 
         "Available Liquidity (USD)": st.column_config.NumberColumn(format="dollar"),
@@ -1025,6 +1024,7 @@ if not df_selected.empty:
         transfer_steps = []
         src_idx, dst_idx = 0, 0
         
+        # 1. Match Withdrawals/Cash to New Deposits
         while src_idx < len(sources) and dst_idx < len(destinations):
             src, dst = sources[src_idx], destinations[dst_idx]
             amount_to_move = min(src['available'], dst['needed'])
@@ -1044,10 +1044,22 @@ if not df_selected.empty:
             if src['available'] < 0.01: src_idx += 1
             if dst['needed'] < 0.01: dst_idx += 1
 
+        # 2. Handle Leftover Sources (Market -> Wallet)
+        # If sources still have funds (available > 0) but destinations are full/empty, 
+        # that money goes to Wallet.
+        while src_idx < len(sources):
+            src = sources[src_idx]
+            if src['available'] > 0.01:
+                transfer_steps.append({
+                    "Destination ID": "Wallet",
+                    "From": src['name'],
+                    "To": "Wallet (Unallocated)",
+                    "Amount To Move ($)": src['available']
+                })
+            src_idx += 1
+
         if transfer_steps:
             df_actions = pd.DataFrame(transfer_steps)
             st.dataframe(df_actions.style.format({"Amount To Move ($)": "${:,.2f}"}), width='stretch', hide_index=True)
         else:
             st.success("✅ Portfolio is aligned with this strategy.")
-else:
-    st.warning("Please paste Market IDs or Monarch links in Section 2 to begin.")
