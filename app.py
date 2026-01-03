@@ -716,33 +716,42 @@ if not df_selected.empty:
         c_abs, c_apy, c_div = get_stats(car_alloc)
         l_abs, l_apy, l_div = get_stats(liquid_alloc)
 
-        # 5-Column High-Level Summary
+        # 6-Column High-Level Summary
         st.subheader("📋 Strategy Comparison")
-        s_col1, s_col2, s_col3, s_col4, s_col5 = st.columns(5)
+        
+        # Extract current APY early to use as reference for deltas
+        current_blended = res_data['current_metrics']['blended_apy']
+        
+        s_col0, s_col1, s_col2, s_col3, s_col4, s_col5 = st.columns(6)
+        
+        with s_col0:
+            st.markdown("<h4 style='color:#9E9E9E; margin-bottom:0;'>Current</h4>", unsafe_allow_html=True)
+            st.metric("APY", f"{current_blended:.2%}")
+            st.caption("Baseline")
         
         with s_col1:
             st.markdown("<h4 style='color:#F44336; margin-bottom:0;'>Best Yield</h4>", unsafe_allow_html=True)
-            st.metric("APY", f"{y_apy:.2%}")
+            st.metric("APY", f"{y_apy:.2%}", delta=f"{(y_apy - current_blended):.2%}")
             st.caption(f"Diversity: **{y_div:.4f}**")
 
         with s_col2:
             st.markdown("<h4 style='color:#2979FF; margin-bottom:0;'>Whale Shield</h4>", unsafe_allow_html=True)
-            st.metric("APY", f"{w_apy:.2%}", delta=f"{(w_apy - y_apy):.2%}")
+            st.metric("APY", f"{w_apy:.2%}", delta=f"{(w_apy - current_blended):.2%}")
             st.caption(f"Diversity: **{w_div:.4f}**")
 
         with s_col3:
             st.markdown("<h4 style='color:#E040FB; margin-bottom:0;'>Frontier</h4>", unsafe_allow_html=True)
-            st.metric("APY", f"{f_apy:.2%}", delta=f"{(f_apy - y_apy):.2%}")
+            st.metric("APY", f"{f_apy:.2%}", delta=f"{(f_apy - current_blended):.2%}")
             st.caption(f"Diversity: **{f_div:.4f}**")
 
         with s_col4:
             st.markdown("<h4 style='color:#7C4DFF; margin-bottom:0;'>Conc-Adj</h4>", unsafe_allow_html=True)
-            st.metric("APY", f"{c_apy:.2%}", delta=f"{(c_apy - y_apy):.2%}")
+            st.metric("APY", f"{c_apy:.2%}", delta=f"{(c_apy - current_blended):.2%}")
             st.caption(f"Diversity: **{c_div:.4f}**")
 
         with s_col5:
             st.markdown("<h4 style='color:#00E676; margin-bottom:0;'>Liquid-Yield</h4>", unsafe_allow_html=True)
-            st.metric("APY", f"{l_apy:.2%}", delta=f"{(l_apy - y_apy):.2%}")
+            st.metric("APY", f"{l_apy:.2%}", delta=f"{(l_apy - current_blended):.2%}")
             st.caption(f"Diversity: **{l_div:.4f}**")
 
         st.divider()
