@@ -22,6 +22,10 @@ SECONDS_PER_YEAR = 31536000
 # Default User Inputs
 DEFAULT_HURDLE_RATE = 4.0
 
+# Chart Performance Constants (NEW)
+MAX_SCATTER_PLOT_POINTS = 5000 # Max points for the Efficiency Frontier plot
+MAX_LINE_PLOT_POINTS_PER_STRATEGY = 1000 # Max points per strategy for the Solver Convergence plot
+
 CHAIN_ID_TO_NAME = {
     1: "Ethereum", 10: "Optimism", 130: "Unichain", 137: "Polygon",
     143: "Monad", 8453: "Base", 42161: "Arbitrum", 999: "HyperEVM",
@@ -742,9 +746,11 @@ if not df_selected.empty:
             st.caption(f"Diversity: **{l_div:.4f}**")
 
         st.divider()
-
+        
         df_scatter = pd.DataFrame(res_data['attempts'])
-        # --- [SECTION END: CONTINUE TO CHARTS] ---
+        # Downsample scatter plot points if too many, to prevent UI lag
+        if len(df_scatter) > MAX_SCATTER_PLOT_POINTS:
+            df_scatter = df_scatter.sample(MAX_SCATTER_PLOT_POINTS, random_state=42)
         
         # Updated Color Mapping
         STRAT_DOMAIN = ['Best Yield', 'Whale Shield', 'Frontier', 'Conc-Adj', 'Liquid-Yield']
@@ -782,11 +788,19 @@ if not df_selected.empty:
         with col_graph2:
             st.markdown("**Solver Convergence**")
             traces = res_data['traces']
+            
             d1 = pd.DataFrame({"Iteration": range(len(traces['yield'])), "Value": traces['yield'], "Strategy": "Best Yield"})
             d2 = pd.DataFrame({"Iteration": range(len(traces['frontier'])), "Value": traces['frontier'], "Strategy": "Frontier"})
             d3 = pd.DataFrame({"Iteration": range(len(traces['car'])), "Value": traces['car'], "Strategy": "Conc-Adj"})
             d4 = pd.DataFrame({"Iteration": range(len(traces['liquid'])), "Value": traces['liquid'], "Strategy": "Liquid-Yield"})
             d5 = pd.DataFrame({"Iteration": range(len(traces['whale'])), "Value": traces['whale'], "Strategy": "Whale Shield"})
+            
+            # Downsample each trace if it has too many points, to prevent UI lag
+            if len(d1) > MAX_LINE_PLOT_POINTS_PER_STRATEGY: d1 = d1.sample(MAX_LINE_PLOT_POINTS_PER_STRATEGY, random_state=42)
+            if len(d2) > MAX_LINE_PLOT_POINTS_PER_STRATEGY: d2 = d2.sample(MAX_LINE_PLOT_POINTS_PER_STRATEGY, random_state=43)
+            if len(d3) > MAX_LINE_PLOT_POINTS_PER_STRATEGY: d3 = d3.sample(MAX_LINE_PLOT_POINTS_PER_STRATEGY, random_state=44)
+            if len(d4) > MAX_LINE_PLOT_POINTS_PER_STRATEGY: d4 = d4.sample(MAX_LINE_PLOT_POINTS_PER_STRATEGY, random_state=45)
+            if len(d5) > MAX_LINE_PLOT_POINTS_PER_STRATEGY: d5 = d5.sample(MAX_LINE_PLOT_POINTS_PER_STRATEGY, random_state=46)
             
             df_hist_long = pd.concat([d1, d2, d3, d4, d5])
             
