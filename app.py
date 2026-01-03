@@ -380,8 +380,8 @@ class RebalanceOptimizer:
                 # User enforces the shield. 
                 # Note: SLSQP with Equality Constraint (Sum = Budget) will likely FAIL or return partials if bounds are too tight.
                 self.whale_warning = (
-                    f"⚠️ **Liquidity Capped:** Total Budget (\${self.total_budget:,.0f}) exceeds the safe liquidity capacity "
-                    f"(\${total_whale_capacity:,.0f}). The solver may fail to allocate the full budget."
+                    rf"⚠️ **Liquidity Capped:** Total Budget (\${self.total_budget:,.0f}) exceeds the safe liquidity capacity "
+                    rf"(\${total_whale_capacity:,.0f}). The solver may fail to allocate the full budget."
                 )
 
         # --- 2. Setup Solver ---
