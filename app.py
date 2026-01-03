@@ -1035,7 +1035,7 @@ if not df_selected.empty:
                     "Destination ID": str(dst['id'])[:7],
                     "From": src['name'],
                     "To": dst['name'],
-                    "Amount ($)": amount_to_move
+                    "Amount To Move ($)": amount_to_move
                 })
             
             src['available'] -= amount_to_move
@@ -1046,7 +1046,7 @@ if not df_selected.empty:
 
         if transfer_steps:
             df_actions = pd.DataFrame(transfer_steps)
-            st.dataframe(df_actions.style.format({"Amount ($)": "${:,.2f}"}), width='stretch', hide_index=True)
+            st.dataframe(df_actions.style.format({"Amount To Move ($)": "${:,.2f}"}), width='stretch', hide_index=True)
         else:
             st.success("✅ Portfolio is aligned with this strategy.")
 else:
