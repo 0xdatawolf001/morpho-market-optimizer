@@ -576,7 +576,7 @@ with col_scope:
         user_wallet = st.text_input("Auto-fill from Wallet Address", placeholder="0x...")
         
     with u_col2:
-        scan_clicked = st.button("Scan Wallet", type="secondary", use_container_width=True)
+        scan_clicked = st.button("Import From Wallet", type="secondary", use_container_width=True)
 
     with u_col3:
         # NEW: Clear All button replaces Clear Wallet Markets
