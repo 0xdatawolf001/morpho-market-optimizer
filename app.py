@@ -570,13 +570,16 @@ with col_scope:
     st.subheader("2. Your Portfolio Scope")
     
     # --- Wallet Scanner ---
-    u_col1, u_col2 = st.columns([3, 1], vertical_alignment="bottom")
+    u_col1, u_col2, u_col3 = st.columns([2, 1, 1], vertical_alignment="bottom")
     
     with u_col1:
         user_wallet = st.text_input("Auto-fill from Wallet Address", placeholder="0x...")
         
     with u_col2:
         scan_clicked = st.button("Scan Wallet", type="secondary", use_container_width=True)
+
+    with u_col3:
+        clear_wallet_clicked = st.button("Clear Wallet Markets", type="secondary", use_container_width=True)
 
     if "portfolio_input_text" not in st.session_state:
         st.session_state.portfolio_input_text = ""
@@ -679,6 +682,29 @@ with col_scope:
                 st.warning("No active Morpho positions found.")
         else:
             st.error("Invalid address.")
+
+    if clear_wallet_clicked:
+        current_text = st.session_state.portfolio_input_text
+        if WALLET_SEP in current_text:
+            # 1. Identify IDs in the wallet section to clear cache
+            parts = current_text.split(WALLET_SEP)
+            manual_part = parts[0]
+            wallet_part = parts[1] if len(parts) > 1 else ""
+            
+            # Extract IDs from the wallet part to wipe them from cache
+            for line in wallet_part.split('\n'):
+                potential = line.split('--')[0].strip().lower()
+                if potential.startswith('0x'):
+                    st.session_state.balance_cache.pop(potential, None)
+            
+            # 2. Update the text area to only contain manual part
+            st.session_state.portfolio_input_text = manual_part.strip()
+            st.success("Wallet markets cleared from scope.")
+            time.sleep(0.5)
+            st.rerun()
+        else:
+            st.info("No wallet markets found to clear.")
+        
 
     # --- Market ID Input ---
     raw_ids = st.text_area(
@@ -1005,11 +1031,13 @@ if not df_selected.empty:
         strategy_choice = st.radio(
             "View Details For:",
             [
+                "Current Portfolio",
                 "Best Yield (Red)", 
                 "Whale Shield (Blue)", 
                 "Frontier (Magenta)", 
                 "Liquid-Yield (Green)"
             ],
+            index=1,
             horizontal=True
         )
         
@@ -1022,8 +1050,11 @@ if not df_selected.empty:
                 st.warning(res_data['opt_object'].whale_warning)
         elif "Frontier" in strategy_choice:
             final_alloc = frontier_alloc
-        else:
+        elif "Liquid" in strategy_choice:
             final_alloc = liquid_alloc
+        else:
+            # Current Portfolio: Target = Current Balance
+            final_alloc = np.array([m['existing_balance_usd'] for m in market_data_list])
 
         results = []
         new_annual_interest = 0
