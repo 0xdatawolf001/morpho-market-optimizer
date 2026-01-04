@@ -776,7 +776,7 @@ if not df_selected.empty:
 
     edited_df = st.data_editor(
         df_selected[['Market ID', 'Chain', 'Loan Token', 'Collateral', 'Existing Balance (USD)']],
-        column_config={"Existing Balance (USD)": st.column_config.NumberColumn(format="$%.2f", min_value=0.0)},
+        column_config={"Existing Balance (USD)": st.column_config.NumberColumn(format="dollar", min_value=0.0)},
         disabled=['Market ID', 'Chain', 'Loan Token', 'Collateral'],
         width='stretch', 
         hide_index=True, 
