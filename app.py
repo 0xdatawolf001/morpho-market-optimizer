@@ -23,6 +23,11 @@ SECONDS_PER_YEAR = 31536000
 MAX_SCATTER_PLOT_POINTS = 50000 # Max points for the Efficiency Frontier plot
 MAX_LINE_PLOT_POINTS_PER_STRATEGY = 10000 # Max points per strategy for the Solver Convergence plot
 
+# For text box
+# Separator Constant
+MANUAL_SEP = "-- Selected Markets --"
+WALLET_SEP = "-- From User Wallet --"
+
 CHAIN_ID_TO_NAME = {
     1: "Ethereum", 10: "Optimism", 130: "Unichain", 137: "Polygon",
     143: "Monad", 8453: "Base", 42161: "Arbitrum", 999: "HyperEVM",
@@ -564,61 +569,109 @@ col_scope, col_param = st.columns([2, 1])
 with col_scope:
     st.subheader("2. Your Portfolio Scope")
     
-    # --- Wallet Scanner (UI FIXED) ---
-    # vertical_alignment="bottom" ensures the button sits on the same baseline as the input field
+    # --- Wallet Scanner ---
     u_col1, u_col2 = st.columns([3, 1], vertical_alignment="bottom")
     
     with u_col1:
         user_wallet = st.text_input("Auto-fill from Wallet Address", placeholder="0x...")
         
     with u_col2:
-        # use_container_width makes the button fill the column width cleanly
         scan_clicked = st.button("Scan Wallet", type="secondary", use_container_width=True)
-    
-# Separator Constant
-    WALLET_SEP = "\n\n-- From User Wallet --"
 
     if "portfolio_input_text" not in st.session_state:
         st.session_state.portfolio_input_text = ""
 
     def handle_text_change():
-        """Triggered when user hits Cmd+Enter or clicks away. Labels manual IDs."""
+        """Extracts unique IDs only and reconstructs the UI text with proper headers/labels."""
         raw_text = st.session_state.portfolio_input_text
-        # Only enrich the manual section (everything before the wallet separator)
-        if WALLET_SEP in raw_text:
-            manual_part, wallet_part = raw_text.split(WALLET_SEP, 1)
-            enriched_manual = enrich_market_ids(manual_part, df_all)
-            st.session_state.portfolio_input_text = enriched_manual + WALLET_SEP + wallet_part
-        else:
-            st.session_state.portfolio_input_text = enrich_market_ids(raw_text, df_all)
+        if not raw_text.strip():
+            return
+
+        # 1. Extract all unique valid Market IDs (lowercase)
+        found_ids = []
+        seen = set()
+        for line in raw_text.replace(',', '\n').split('\n'):
+            # Strip comments and links
+            potential = line.split('--')[0].strip()
+            if not potential: continue
+            mid = extract_market_id_from_monarch_link(potential).lower()
+            if mid.startswith('0x') and len(mid) > 20 and mid not in seen:
+                found_ids.append(mid)
+                seen.add(mid)
+
+        # 2. Separate into Manual vs Wallet based on existing cache
+        wallet_ids_in_cache = {k.lower() for k, v in st.session_state.balance_cache.items() if v > 0}
+        
+        manual_lines = []
+        wallet_lines = []
+        
+        for mid in found_ids:
+            # Enrichment logic
+            row = df_all[df_all['Market ID'].str.lower() == mid]
+            label = f" -- {row.iloc[0]['Loan Token']}/{row.iloc[0]['Collateral']}" if not row.empty else ""
+            formatted_line = f"{mid}{label}"
+            
+            if mid in wallet_ids_in_cache:
+                wallet_lines.append(formatted_line)
+            else:
+                manual_lines.append(formatted_line)
+
+        # 3. Reconstruct string
+        new_parts = []
+        if manual_lines:
+            new_parts.append(MANUAL_SEP)
+            new_parts.extend(manual_lines)
+            new_parts.append("") # Spacer
+            
+        if wallet_lines:
+            new_parts.append(WALLET_SEP)
+            new_parts.extend(wallet_lines)
+
+        st.session_state.portfolio_input_text = "\n".join(new_parts).strip()
 
     if scan_clicked:
         if len(user_wallet) > 10:
             found_positions = fetch_user_positions(user_wallet)
             if found_positions:
-                # 1. Update Balances
+                # 1. Update Balances in cache
                 st.session_state.balance_cache.update(found_positions)
+                new_wallet_ids = {k.lower() for k in found_positions.keys()}
                 
-                # 2. Extract Manual Section
-                current_text = st.session_state.portfolio_input_text
-                if WALLET_SEP in current_text:
-                    manual_part = current_text.split(WALLET_SEP)[0].strip()
-                else:
-                    manual_part = current_text.strip()
-                
-                # 3. Generate New Wallet Section
-                wallet_entries = []
-                for mid in found_positions.keys():
-                    row = df_all[df_all['Market ID'] == mid]
-                    if not row.empty:
-                        entry = f"{mid} -- {row.iloc[0]['Loan Token']}/{row.iloc[0]['Collateral']}"
-                    else:
-                        entry = mid
-                    wallet_entries.append(entry)
-                
-                # 4. Combine
-                new_text = manual_part + WALLET_SEP + "\n" + "\n".join(wallet_entries)
-                st.session_state.portfolio_input_text = new_text
+                # 2. Extract existing IDs from text box to preserve manual entries
+                existing_text = st.session_state.portfolio_input_text
+                existing_ids = []
+                seen_ids = set()
+                for line in existing_text.replace(',', '\n').split('\n'):
+                    potential = line.split('--')[0].strip()
+                    if not potential: continue
+                    mid = extract_market_id_from_monarch_link(potential).lower()
+                    if mid.startswith('0x') and len(mid) > 20 and mid not in seen_ids:
+                        existing_ids.append(mid)
+                        seen_ids.add(mid)
+
+                # 3. Combine and Categorize
+                # Manual = existing IDs that are NOT in the new wallet scan
+                manual_ids = [m for m in existing_ids if m not in new_wallet_ids]
+                # Wallet = the new wallet scan IDs (maintains order from API)
+                wallet_ids = list(new_wallet_ids)
+
+                # 4. Reconstruct formatted text
+                final_parts = []
+                if manual_ids:
+                    final_parts.append(MANUAL_SEP)
+                    for mid in manual_ids:
+                        row = df_all[df_all['Market ID'].str.lower() == mid]
+                        label = f" -- {row.iloc[0]['Loan Token']}/{row.iloc[0]['Collateral']}" if not row.empty else ""
+                        final_parts.append(f"{mid}{label}")
+                    final_parts.append("")
+
+                final_parts.append(WALLET_SEP)
+                for mid in wallet_ids:
+                    row = df_all[df_all['Market ID'].str.lower() == mid]
+                    label = f" -- {row.iloc[0]['Loan Token']}/{row.iloc[0]['Collateral']}" if not row.empty else ""
+                    final_parts.append(f"{mid}{label}")
+
+                st.session_state.portfolio_input_text = "\n".join(final_parts).strip()
                 st.success(f"Found {len(found_positions)} positions!")
                 time.sleep(0.5)
                 st.rerun()
@@ -634,13 +687,12 @@ with col_scope:
         height=300,
         placeholder="Market IDs or Links...",
         key="portfolio_input_text",
-        on_change=handle_text_change # Auto-labels manual IDs on Cmd+Enter
+        on_change=handle_text_change 
     )
     
     clean_ids = []
-    # Logic to extract IDs remains the same
     for line in raw_ids.replace(',', '\n').split('\n'):
-        if "-- From User Wallet --" in line: continue
+        if WALLET_SEP in line: continue
         line_clean = line.split('--')[0].strip()
         if line_clean:
             extracted_id = extract_market_id_from_monarch_link(line_clean)
@@ -676,8 +728,8 @@ with col_param:
     )
 
 if not df_selected.empty:
-    st.info("💡 Enter your current USD holdings for the selected markets:")
-    
+    # Yellow box st.info removed per request
+
     # 1. Ensure current state is mapped to the dataframe
     df_selected['Existing Balance (USD)'] = df_selected['Market ID'].apply(
         lambda x: st.session_state.balance_cache.get(x, 0.0)
