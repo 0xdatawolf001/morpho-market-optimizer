@@ -61,14 +61,15 @@ def extract_market_id_from_monarch_link(text: str) -> str:
             return parts[-1].lower()
     return text.lower()
 
-def filter_small_moves(allocations, market_data_list, threshold_usd):
+def filter_small_moves(allocations, market_data_list, threshold_usd, total_budget):
     """
     Applies a post-optimization filter.
-    If the difference between the Optimized Target and Current Balance is less than threshold,
-    revert the allocation to the Current Balance (Effective Action: HOLD).
+    1. If difference between Target and Current is < threshold, revert to Current (HOLD).
+    2. If resulting Unallocated Cash (Wallet) is < threshold, force-reallocate it to markets.
     """
     cleaned_allocations = allocations.copy()
     
+    # 1. Filter individual Market Moves
     for i, target_val in enumerate(cleaned_allocations):
         current_balance = market_data_list[i]['existing_balance_usd']
         
@@ -79,6 +80,29 @@ def filter_small_moves(allocations, market_data_list, threshold_usd):
         # We revert the target to match the current balance exactly.
         if diff > 0.01 and diff < threshold_usd:
             cleaned_allocations[i] = current_balance
+
+    # 2. Filter Wallet Dust (Unallocated Cash < Threshold)
+    # If the optimizer (or the filter above) leaves a small amount of cash that is 
+    # below the threshold, we push it back into the markets to avoid a tiny "Cash Out".
+    current_total = np.sum(cleaned_allocations)
+    unallocated = total_budget - current_total
+    
+    if unallocated > 0.01 and unallocated < threshold_usd:
+        # Priority: Add back to a market we are withdrawing from (to reduce the withdrawal)
+        # Fallback: Add to the largest allocation
+        
+        candidates = []
+        for i, target_val in enumerate(cleaned_allocations):
+            if target_val < market_data_list[i]['existing_balance_usd']:
+                candidates.append(i)
+        
+        if candidates:
+            # Reduce withdrawal on the first candidate
+            cleaned_allocations[candidates[0]] += unallocated
+        else:
+            # No withdrawals, just add to largest bucket
+            best_idx = np.argmax(cleaned_allocations)
+            cleaned_allocations[best_idx] += unallocated
             
     return cleaned_allocations
 
@@ -657,11 +681,12 @@ if not df_selected.empty:
         # Unpack 5 results
         r_yield, r_frontier, r_car, r_liquid, r_whale = opt.optimize()
 
-        cleaned_yield = filter_small_moves(r_yield, market_data_list, min_move_thresh)
-        cleaned_frontier = filter_small_moves(r_frontier, market_data_list, min_move_thresh)
-        cleaned_car = filter_small_moves(r_car, market_data_list, min_move_thresh)
-        cleaned_liquid = filter_small_moves(r_liquid, market_data_list, min_move_thresh)
-        cleaned_whale = filter_small_moves(r_whale, market_data_list, min_move_thresh)
+        # MODIFIED: Pass total_optimizable to filter_small_moves to handle Unallocated Cash
+        cleaned_yield = filter_small_moves(r_yield, market_data_list, min_move_thresh, total_optimizable)
+        cleaned_frontier = filter_small_moves(r_frontier, market_data_list, min_move_thresh, total_optimizable)
+        cleaned_car = filter_small_moves(r_car, market_data_list, min_move_thresh, total_optimizable)
+        cleaned_liquid = filter_small_moves(r_liquid, market_data_list, min_move_thresh, total_optimizable)
+        cleaned_whale = filter_small_moves(r_whale, market_data_list, min_move_thresh, total_optimizable)
         
         st.session_state['opt_results'] = {
             'market_data_list': market_data_list,
@@ -1067,12 +1092,12 @@ if not df_selected.empty:
             if src['available'] < 0.01: src_idx += 1
             if dst['needed'] < 0.01: dst_idx += 1
 
-        # 2. Handle Leftover Sources (Market -> Wallet)
+# 2. Handle Leftover Sources (Market -> Wallet)
         # If sources still have funds (available > 0) but destinations are full/empty, 
         # that money goes to Wallet.
         while src_idx < len(sources):
             src = sources[src_idx]
-            if src['available'] > 0.01:
+            if src['available'] > 0.01 and src['available'] >= min_move_thresh:
                 transfer_steps.append({
                     "Destination ID": "Wallet",
                     "From": src['name'],
