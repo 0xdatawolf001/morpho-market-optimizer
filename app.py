@@ -579,7 +579,8 @@ with col_scope:
         scan_clicked = st.button("Scan Wallet", type="secondary", use_container_width=True)
 
     with u_col3:
-        clear_wallet_clicked = st.button("Clear Wallet Markets", type="secondary", use_container_width=True)
+        # NEW: Clear All button replaces Clear Wallet Markets
+        clear_all_clicked = st.button("Clear All", type="primary", use_container_width=True)
 
     if "portfolio_input_text" not in st.session_state:
         st.session_state.portfolio_input_text = ""
@@ -603,21 +604,37 @@ with col_scope:
                 seen.add(mid)
 
         # 2. Separate into Manual vs Wallet based on existing cache
-        wallet_ids_in_cache = {k.lower() for k, v in st.session_state.balance_cache.items() if v > 0}
+        current_text = st.session_state.portfolio_input_text
         
         manual_lines = []
         wallet_lines = []
         
-        for mid in found_ids:
-            # Enrichment logic
-            row = df_all[df_all['Market ID'].str.lower() == mid]
-            label = f" -- {row.iloc[0]['Loan Token']}/{row.iloc[0]['Collateral']}" if not row.empty else ""
-            formatted_line = f"{mid}{label}"
-            
-            if mid in wallet_ids_in_cache:
-                wallet_lines.append(formatted_line)
-            else:
-                manual_lines.append(formatted_line)
+        # Simple parse to preserve section location
+        if WALLET_SEP in current_text:
+            parts = current_text.split(WALLET_SEP)
+            manual_part = parts[0]
+            wallet_part = parts[1]
+        else:
+            manual_part = current_text
+            wallet_part = ""
+
+        # Re-enrich manual part
+        for line in manual_part.split('\n'):
+            clean = line.split('--')[0].strip()
+            mid = extract_market_id_from_monarch_link(clean).lower()
+            if mid.startswith('0x'):
+                row = df_all[df_all['Market ID'].str.lower() == mid]
+                label = f" -- {row.iloc[0]['Loan Token']}/{row.iloc[0]['Collateral']}" if not row.empty else ""
+                manual_lines.append(f"{mid}{label}")
+
+        # Re-enrich wallet part
+        for line in wallet_part.split('\n'):
+            clean = line.split('--')[0].strip()
+            mid = extract_market_id_from_monarch_link(clean).lower()
+            if mid.startswith('0x'):
+                row = df_all[df_all['Market ID'].str.lower() == mid]
+                label = f" -- {row.iloc[0]['Loan Token']}/{row.iloc[0]['Collateral']}" if not row.empty else ""
+                wallet_lines.append(f"{mid}{label}")
 
         # 3. Reconstruct string
         new_parts = []
@@ -633,83 +650,87 @@ with col_scope:
         st.session_state.portfolio_input_text = "\n".join(new_parts).strip()
 
     if scan_clicked:
-        if len(user_wallet) > 10:
+        # Case 1: Empty Address -> Remove all wallet markets
+        if len(user_wallet) < 10:
+            current_text = st.session_state.portfolio_input_text
+            if WALLET_SEP in current_text:
+                # Keep only manual part
+                manual_part = current_text.split(WALLET_SEP)[0].strip()
+                st.session_state.portfolio_input_text = manual_part
+                st.warning("Address cleared: Wallet markets removed.")
+            else:
+                st.info("No wallet markets to remove.")
+            st.rerun()
+
+        # Case 2: New Address -> Replace wallet markets
+        else:
             found_positions = fetch_user_positions(user_wallet)
+            
             if found_positions:
                 # 1. Update Balances in cache
                 st.session_state.balance_cache.update(found_positions)
                 new_wallet_ids = {k.lower() for k in found_positions.keys()}
                 
-                # 2. Extract existing IDs from text box to preserve manual entries
-                existing_text = st.session_state.portfolio_input_text
-                existing_ids = []
-                seen_ids = set()
-                for line in existing_text.replace(',', '\n').split('\n'):
+                # 2. Preserve Manual Inputs Only
+                current_text = st.session_state.portfolio_input_text
+                manual_ids = []
+                
+                # If separator exists, take everything before it
+                if WALLET_SEP in current_text:
+                    manual_text = current_text.split(WALLET_SEP)[0]
+                else:
+                    manual_text = current_text
+                    
+                for line in manual_text.replace(',', '\n').split('\n'):
                     potential = line.split('--')[0].strip()
                     if not potential: continue
                     mid = extract_market_id_from_monarch_link(potential).lower()
-                    if mid.startswith('0x') and len(mid) > 20 and mid not in seen_ids:
-                        existing_ids.append(mid)
-                        seen_ids.add(mid)
+                    if mid.startswith('0x') and len(mid) > 20:
+                        # Don't add if it's going to be in the new wallet section
+                        if mid not in new_wallet_ids:
+                            manual_ids.append(mid)
 
-                # 3. Combine and Categorize
-                # Manual = existing IDs that are NOT in the new wallet scan
-                manual_ids = [m for m in existing_ids if m not in new_wallet_ids]
-                # Wallet = the new wallet scan IDs (maintains order from API)
-                wallet_ids = list(new_wallet_ids)
-
-                # 4. Reconstruct formatted text
+                # 3. Reconstruct with REPLACED wallet section
                 final_parts = []
+                
+                # Add Manual
                 if manual_ids:
                     final_parts.append(MANUAL_SEP)
+                    # Remove duplicates in manual
+                    seen_man = set()
                     for mid in manual_ids:
-                        row = df_all[df_all['Market ID'].str.lower() == mid]
-                        label = f" -- {row.iloc[0]['Loan Token']}/{row.iloc[0]['Collateral']}" if not row.empty else ""
-                        final_parts.append(f"{mid}{label}")
+                        if mid not in seen_man:
+                            row = df_all[df_all['Market ID'].str.lower() == mid]
+                            label = f" -- {row.iloc[0]['Loan Token']}/{row.iloc[0]['Collateral']}" if not row.empty else ""
+                            final_parts.append(f"{mid}{label}")
+                            seen_man.add(mid)
                     final_parts.append("")
 
+                # Add New Wallet
                 final_parts.append(WALLET_SEP)
-                for mid in wallet_ids:
+                for mid in list(new_wallet_ids):
                     row = df_all[df_all['Market ID'].str.lower() == mid]
                     label = f" -- {row.iloc[0]['Loan Token']}/{row.iloc[0]['Collateral']}" if not row.empty else ""
                     final_parts.append(f"{mid}{label}")
 
                 st.session_state.portfolio_input_text = "\n".join(final_parts).strip()
-                st.success(f"Found {len(found_positions)} positions!")
+                st.success(f"Loaded {len(found_positions)} markets from new wallet.")
                 time.sleep(0.5)
                 st.rerun()
             else:
-                st.warning("No active Morpho positions found.")
-        else:
-            st.error("Invalid address.")
+                st.warning("No active Morpho positions found for this address.")
 
-    if clear_wallet_clicked:
-        current_text = st.session_state.portfolio_input_text
-        if WALLET_SEP in current_text:
-            # 1. Identify IDs in the wallet section to clear cache
-            parts = current_text.split(WALLET_SEP)
-            manual_part = parts[0]
-            wallet_part = parts[1] if len(parts) > 1 else ""
-            
-            # Extract IDs from the wallet part to wipe them from cache
-            for line in wallet_part.split('\n'):
-                potential = line.split('--')[0].strip().lower()
-                if potential.startswith('0x'):
-                    st.session_state.balance_cache.pop(potential, None)
-            
-            # 2. Update the text area to only contain manual part
-            st.session_state.portfolio_input_text = manual_part.strip()
-            st.success("Wallet markets cleared from scope.")
-            time.sleep(0.5)
-            st.rerun()
-        else:
-            st.info("No wallet markets found to clear.")
-        
+    if clear_all_clicked:
+        st.session_state.portfolio_input_text = ""
+        st.session_state.balance_cache = {} # Wipe balance cache
+        st.success("All markets and balances cleared.")
+        time.sleep(0.5)
+        st.rerun()
 
     # --- Market ID Input ---
+    # FIXED: Removed value= argument. Key handles binding.
     raw_ids = st.text_area(
         "Paste Market IDs or Monarch links (one per line)", 
-        value=st.session_state.portfolio_input_text,
         height=300,
         placeholder="Market IDs or Links...",
         key="portfolio_input_text",
@@ -718,7 +739,7 @@ with col_scope:
     
     clean_ids = []
     for line in raw_ids.replace(',', '\n').split('\n'):
-        if WALLET_SEP in line: continue
+        if WALLET_SEP in line or MANUAL_SEP in line: continue
         line_clean = line.split('--')[0].strip()
         if line_clean:
             extracted_id = extract_market_id_from_monarch_link(line_clean)
@@ -760,6 +781,8 @@ if not df_selected.empty:
     df_selected['Existing Balance (USD)'] = df_selected['Market ID'].apply(
         lambda x: st.session_state.balance_cache.get(x, 0.0)
     )
+
+    df_selected = df_selected.sort_values(by='Existing Balance (USD)', ascending=False)
 
     def sync_portfolio_edits():
         if "portfolio_editor" in st.session_state:
