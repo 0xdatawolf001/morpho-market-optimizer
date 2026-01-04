@@ -61,6 +61,23 @@ def extract_market_id_from_monarch_link(text: str) -> str:
             return parts[-1].lower()
     return text.lower()
 
+def enrich_market_ids(text, df_all):
+    """Adds -- Loan/Collateral labels to raw Market IDs in text."""
+    lines = text.split('\n')
+    enriched_lines = []
+    for line in lines:
+        clean = line.strip()
+        # If it looks like a Market ID and doesn't already have a label/comment
+        if clean.startswith('0x') and '--' not in clean and len(clean) >= 60:
+            row = df_all[df_all['Market ID'].str.lower() == clean.lower()]
+            if not row.empty:
+                loan = row.iloc[0]['Loan Token']
+                coll = row.iloc[0]['Collateral']
+                enriched_lines.append(f"{clean} -- {loan}/{coll}")
+                continue
+        enriched_lines.append(line)
+    return "\n".join(enriched_lines)
+
 def filter_small_moves(allocations, market_data_list, threshold_usd, total_budget):
     """
     Applies a post-optimization filter.
@@ -222,9 +239,41 @@ def fetch_live_market_details(selected_df):
     my_bar.empty()
     return details
 
-# ==========================================
-# 3. OPTIMIZER
-# ==========================================
+def fetch_user_positions(user_address):
+    """
+    Fetches all active supply positions for a specific user address across all chains.
+    Returns a dict: {market_id: supply_usd_balance}
+    """
+    user_address = user_address.lower()
+    query = """
+    query GetUserPositions($user: [String!]) {
+      marketPositions(first: 100, where: { userAddress_in: $user }) {
+        items {
+          market { uniqueKey }
+          supplyAssetsUsd
+        }
+      }
+    }
+    """
+    
+    positions = {}
+    try:
+        # We fetch simply using the main endpoint; Morpho API aggregates chains usually
+        variables = {"user": [user_address]}
+        resp = requests.post(MORPHO_API_URL, json={'query': query, 'variables': variables})
+        data = resp.json()
+        
+        if 'data' in data and 'marketPositions' in data['data']:
+            items = data['data']['marketPositions']['items']
+            for item in items:
+                m_id = item['market']['uniqueKey']
+                bal = float(item['supplyAssetsUsd'])
+                if bal > 0.01: # Filter dust
+                    positions[m_id] = bal
+    except Exception as e:
+        st.error(f"Error fetching user positions: {e}")
+        
+    return positions
 
 # ==========================================
 # 3. OPTIMIZER
@@ -533,17 +582,87 @@ col_scope, col_param = st.columns([2, 1])
 
 with col_scope:
     st.subheader("2. Your Portfolio Scope")
+    
+    # --- Wallet Scanner (UI FIXED) ---
+    # vertical_alignment="bottom" ensures the button sits on the same baseline as the input field
+    u_col1, u_col2 = st.columns([3, 1], vertical_alignment="bottom")
+    
+    with u_col1:
+        user_wallet = st.text_input("Auto-fill from Wallet Address", placeholder="0x...")
+        
+    with u_col2:
+        # use_container_width makes the button fill the column width cleanly
+        scan_clicked = st.button("Scan Wallet", type="secondary", use_container_width=True)
+    
+# Separator Constant
+    WALLET_SEP = "\n\n-- From User Wallet --"
+
+    if "portfolio_input_text" not in st.session_state:
+        st.session_state.portfolio_input_text = ""
+
+    def handle_text_change():
+        """Triggered when user hits Cmd+Enter or clicks away. Labels manual IDs."""
+        raw_text = st.session_state.portfolio_input_text
+        # Only enrich the manual section (everything before the wallet separator)
+        if WALLET_SEP in raw_text:
+            manual_part, wallet_part = raw_text.split(WALLET_SEP, 1)
+            enriched_manual = enrich_market_ids(manual_part, df_all)
+            st.session_state.portfolio_input_text = enriched_manual + WALLET_SEP + wallet_part
+        else:
+            st.session_state.portfolio_input_text = enrich_market_ids(raw_text, df_all)
+
+    if scan_clicked:
+        if len(user_wallet) > 10:
+            found_positions = fetch_user_positions(user_wallet)
+            if found_positions:
+                # 1. Update Balances
+                st.session_state.balance_cache.update(found_positions)
+                
+                # 2. Extract Manual Section
+                current_text = st.session_state.portfolio_input_text
+                if WALLET_SEP in current_text:
+                    manual_part = current_text.split(WALLET_SEP)[0].strip()
+                else:
+                    manual_part = current_text.strip()
+                
+                # 3. Generate New Wallet Section
+                wallet_entries = []
+                for mid in found_positions.keys():
+                    row = df_all[df_all['Market ID'] == mid]
+                    if not row.empty:
+                        entry = f"{mid} -- {row.iloc[0]['Loan Token']}/{row.iloc[0]['Collateral']}"
+                    else:
+                        entry = mid
+                    wallet_entries.append(entry)
+                
+                # 4. Combine
+                new_text = manual_part + WALLET_SEP + "\n" + "\n".join(wallet_entries)
+                st.session_state.portfolio_input_text = new_text
+                st.success(f"Found {len(found_positions)} positions!")
+                time.sleep(0.5)
+                st.rerun()
+            else:
+                st.warning("No active Morpho positions found.")
+        else:
+            st.error("Invalid address.")
+
+    # --- Market ID Input ---
     raw_ids = st.text_area(
         "Paste Market IDs or Monarch links (one per line)", 
-        value="", 
-        height=355,
-        placeholder="Market IDs or Links..."
+        value=st.session_state.portfolio_input_text,
+        height=300,
+        placeholder="Market IDs or Links...",
+        key="portfolio_input_text",
+        on_change=handle_text_change # Auto-labels manual IDs on Cmd+Enter
     )
+    
     clean_ids = []
+    # Logic to extract IDs remains the same
     for line in raw_ids.replace(',', '\n').split('\n'):
-        line = line.strip()
-        if line:
-            extracted_id = extract_market_id_from_monarch_link(line)
+        if "-- From User Wallet --" in line: continue
+        line_clean = line.split('--')[0].strip()
+        if line_clean:
+            extracted_id = extract_market_id_from_monarch_link(line_clean)
             if extracted_id and extracted_id not in clean_ids:
                 clean_ids.append(extracted_id)
     
