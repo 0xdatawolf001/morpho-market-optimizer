@@ -698,8 +698,8 @@ with col_param:
 
     allow_break = st.checkbox(
         "Allow Whale Shield Overflow?",
-        value=True,
-        help="If your Budget > Safe Liquidity Limits, allow the optimizer to ignore the limits (unsafe) to ensure all money is invested. If unchecked, it will leave cash unallocated."
+        value=False,
+        help="If your Budget > Safe Liquidity Limits, allow the optimizer to ignore the limits (unsafe) to ensure all money is invested. If unchecked, it will leave cash unallocated. Checking this ignores the max allocation per market constraint"
     )
 
 if not df_selected.empty:
