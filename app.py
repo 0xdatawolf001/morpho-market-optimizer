@@ -775,9 +775,9 @@ if not df_selected.empty:
                     st.session_state.balance_cache[m_id] = val
 
     edited_df = st.data_editor(
-        df_selected[['Market ID', 'Loan Token', 'Collateral', 'Existing Balance (USD)']],
+        df_selected[['Market ID', 'Chain', 'Loan Token', 'Collateral', 'Existing Balance (USD)']],
         column_config={"Existing Balance (USD)": st.column_config.NumberColumn(format="$%.2f", min_value=0.0)},
-        disabled=['Market ID', 'Loan Token', 'Collateral'],
+        disabled=['Market ID', 'Chain', 'Loan Token', 'Collateral'],
         width='stretch', 
         hide_index=True, 
         key="portfolio_editor",
