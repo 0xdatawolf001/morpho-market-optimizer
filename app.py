@@ -19,12 +19,9 @@ TARGET_UTILIZATION = 0.9
 CURVE_STEEPNESS = 4.0
 SECONDS_PER_YEAR = 31536000
 
-# Default User Inputs
-DEFAULT_HURDLE_RATE = 4.0
-
 # Chart Performance Constants (NEW)
-MAX_SCATTER_PLOT_POINTS = 5000 # Max points for the Efficiency Frontier plot
-MAX_LINE_PLOT_POINTS_PER_STRATEGY = 1000 # Max points per strategy for the Solver Convergence plot
+MAX_SCATTER_PLOT_POINTS = 50000 # Max points for the Efficiency Frontier plot
+MAX_LINE_PLOT_POINTS_PER_STRATEGY = 10000 # Max points per strategy for the Solver Convergence plot
 
 CHAIN_ID_TO_NAME = {
     1: "Ethereum", 10: "Optimism", 130: "Unichain", 137: "Polygon",
@@ -280,19 +277,17 @@ def fetch_user_positions(user_address):
 # ==========================================
 
 class RebalanceOptimizer:
-    def __init__(self, total_budget, market_list, hurdle_rate_pct, max_dominance_pct=100.0, allow_overflow=False):
+    def __init__(self, total_budget, market_list, max_dominance_pct=100.0, allow_overflow=False):
         self.total_budget = total_budget 
         self.markets = market_list
-        self.hurdle_rate = hurdle_rate_pct / 100.0
         self.max_dominance_ratio = max_dominance_pct / 100.0 
-        self.allow_overflow = allow_overflow # NEW
+        self.allow_overflow = allow_overflow 
         
         self.yield_trace = []    
         self.frontier_trace = [] 
-        self.car_trace = []
         self.liquid_trace = []
         self.whale_trace = []
-        self.whale_warning = None # NEW: Store warning state
+        self.whale_warning = None 
         
         self.all_attempts = []   
 
@@ -345,11 +340,7 @@ class RebalanceOptimizer:
         hhi = np.sum(weights**2)
         diversity = 1.0 - hhi
         
-        hurdle_cost = self.total_budget * self.hurdle_rate
-        excess_return = total_yield - hurdle_cost
-        car_score = excess_return / (hhi + 1e-9)
-        
-        return normalized_x, total_yield, diversity, car_score
+        return normalized_x, total_yield, diversity
 
     def _record_attempt(self, total_yield, diversity):
         self.all_attempts.append({
@@ -362,25 +353,19 @@ class RebalanceOptimizer:
     # --- Objectives ---
     
     def objective_yield(self, x):
-        norm_x, y_val, div_val, car_val = self._calculate_metrics(x)
+        norm_x, y_val, div_val = self._calculate_metrics(x)
         self._record_attempt(y_val, div_val)
         self.yield_trace.append(y_val)
         return -y_val
 
     def objective_frontier(self, x):
-        norm_x, y_val, div_val, car_val = self._calculate_metrics(x)
+        norm_x, y_val, div_val = self._calculate_metrics(x)
         self._record_attempt(y_val, div_val)
         self.frontier_trace.append(y_val) 
         return -(y_val * div_val) 
 
-    def objective_car(self, x):
-        norm_x, y_val, div_val, car_val = self._calculate_metrics(x)
-        self._record_attempt(y_val, div_val)
-        self.car_trace.append(y_val) 
-        return -car_val
-
     def objective_liquidity(self, x):
-        norm_x, y_val, div_val, car_val = self._calculate_metrics(x)
+        norm_x, y_val, div_val = self._calculate_metrics(x)
         self._record_attempt(y_val, div_val)
         self.liquid_trace.append(y_val)
         
@@ -395,14 +380,14 @@ class RebalanceOptimizer:
         return -liq_score
 
     def objective_whale(self, x):
-        norm_x, y_val, div_val, car_val = self._calculate_metrics(x)
+        norm_x, y_val, div_val = self._calculate_metrics(x)
         self._record_attempt(y_val, div_val)
         self.whale_trace.append(y_val)
         return -y_val
 
     def optimize(self):
         n = len(self.markets)
-        if n == 0: return None, None, None, None, None
+        if n == 0: return None, None, None, None
         
         # --- 1. Define Standard Bounds ---
         standard_bounds = []
@@ -473,16 +458,12 @@ class RebalanceOptimizer:
         # B. Frontier
         res_frontier = minimize(self.objective_frontier, x0, method='SLSQP', bounds=standard_bounds, constraints=constraints, tol=1e-6, options=options)
         best_frontier_alloc = self._get_normalized_allocations(res_frontier.x)
-
-        # C. Concentration-Adj Return
-        res_car = minimize(self.objective_car, x0, method='SLSQP', bounds=standard_bounds, constraints=constraints, tol=1e-6, options=options)
-        best_car_alloc = self._get_normalized_allocations(res_car.x)
         
-        # D. Liquidity Weighted
+        # C. Liquidity Weighted
         res_liq = minimize(self.objective_liquidity, x0, method='SLSQP', bounds=standard_bounds, constraints=constraints, tol=1e-6, options=options)
         best_liquid_alloc = self._get_normalized_allocations(res_liq.x)
         
-        # E. Whale Shield
+        # D. Whale Shield
         # If allow_overflow=True and capacity is hit, whale_bounds is now just standard_bounds
         res_whale = minimize(self.objective_whale, x0, method='SLSQP', bounds=whale_bounds, constraints=constraints, tol=1e-6, options=options)
         
@@ -494,7 +475,7 @@ class RebalanceOptimizer:
         else:
              best_whale_alloc = self._get_normalized_allocations(res_whale.x)
         
-        return best_yield_alloc, best_frontier_alloc, best_car_alloc, best_liquid_alloc, best_whale_alloc
+        return best_yield_alloc, best_frontier_alloc, best_liquid_alloc, best_whale_alloc
     
 # ==========================================
 # 4. STREAMLIT UI
@@ -671,15 +652,6 @@ with col_scope:
 with col_param:
     st.subheader("3. Parameters")
     new_cash = st.number_input("Additional New Cash (USD)", value=0.0, step=1000.0)
-    
-    hurdle_rate = st.number_input(
-        "Concentration-Adj: Hurdle Rate %", 
-        min_value=-100.0, 
-        max_value=100.0, 
-        value=DEFAULT_HURDLE_RATE, 
-        step=0.1,
-        help='This is the tangency portfolio while accounting your minimal required rate of return. You can use ETH staking rate, AAVE safest pool rates etc.'
-    )
 
     # NEW: Whale Shield Input
     max_dominance = st.number_input(
@@ -749,7 +721,7 @@ if not df_selected.empty:
     st.divider()
 
     with st.expander("ℹ️ About the Portfolio Strategies", expanded=True):
-        col_info1, col_info2, col_info3, col_info4, col_info5 = st.columns(5)
+        col_info1, col_info2, col_info3, col_info4 = st.columns(4)
         
         with col_info1:
             st.markdown("🔴 **Best Yield**")
@@ -767,20 +739,13 @@ if not df_selected.empty:
             )
             
         with col_info3:
-            st.markdown("🟣 **Conc-Adj**")
-            st.caption(
-                "**Risk-Adjusted.** Maximizes `(Yield - Hurdle) / Concentration`. "
-                "Penalizes putting all eggs in one basket unless the yield is substantially higher than your hurdle rate."
-            )
-            
-        with col_info4:
             st.markdown("🌸 **Frontier**")
             st.caption(
                 "**Balanced.** Finds the mathematical 'sweet spot' (Pareto Efficiency) between "
                 "maximizing raw yield and maximizing the Diversity Score (1 - HHI)."
             )
 
-        with col_info5:
+        with col_info4:
             st.markdown("🟢 **Liquid-Yield**")
             st.caption(
                 "**Depth-First.** Prioritizes markets with deep available liquidity. "
@@ -796,15 +761,14 @@ if not df_selected.empty:
         current_blended_apy = current_annual_interest / current_wealth if current_wealth > 0 else 0.0
 
         # Pass max_dominance and allow_overflow to Optimizer
-        opt = RebalanceOptimizer(total_optimizable, market_data_list, hurdle_rate, max_dominance, allow_break)
+        opt = RebalanceOptimizer(total_optimizable, market_data_list, max_dominance, allow_break)
         
-        # Unpack 5 results
-        r_yield, r_frontier, r_car, r_liquid, r_whale = opt.optimize()
+        # Unpack 4 results
+        r_yield, r_frontier, r_liquid, r_whale = opt.optimize()
 
         # MODIFIED: Pass total_optimizable to filter_small_moves to handle Unallocated Cash
         cleaned_yield = filter_small_moves(r_yield, market_data_list, min_move_thresh, total_optimizable)
         cleaned_frontier = filter_small_moves(r_frontier, market_data_list, min_move_thresh, total_optimizable)
-        cleaned_car = filter_small_moves(r_car, market_data_list, min_move_thresh, total_optimizable)
         cleaned_liquid = filter_small_moves(r_liquid, market_data_list, min_move_thresh, total_optimizable)
         cleaned_whale = filter_small_moves(r_whale, market_data_list, min_move_thresh, total_optimizable)
         
@@ -813,9 +777,8 @@ if not df_selected.empty:
             'opt_object': opt,
             'best_yield_alloc': cleaned_yield,
             'frontier_alloc': cleaned_frontier,
-            'car_alloc': cleaned_car,
             'liquid_alloc': cleaned_liquid,
-            'whale_alloc': cleaned_whale, # NEW
+            'whale_alloc': cleaned_whale, 
             'current_metrics': {
                 'annual_interest': current_annual_interest,
                 'blended_apy': current_blended_apy
@@ -823,7 +786,6 @@ if not df_selected.empty:
             'traces': {
                 'yield': opt.yield_trace,
                 'frontier': opt.frontier_trace,
-                'car': opt.car_trace,
                 'liquid': opt.liquid_trace,
                 'whale': opt.whale_trace
             },
@@ -840,9 +802,8 @@ if not df_selected.empty:
         market_data_list = res_data['market_data_list']
         best_yield_alloc = res_data['best_yield_alloc']
         frontier_alloc = res_data['frontier_alloc']
-        car_alloc = res_data['car_alloc']
         liquid_alloc = res_data['liquid_alloc']
-        whale_alloc = res_data['whale_alloc'] # NEW
+        whale_alloc = res_data['whale_alloc'] 
         
         # --- [SECTION START: METRIC SUMMARY & STATS] ---
         def get_stats(alloc):
@@ -858,16 +819,15 @@ if not df_selected.empty:
         y_abs, y_apy, y_div = get_stats(best_yield_alloc)
         w_abs, w_apy, w_div = get_stats(whale_alloc)
         f_abs, f_apy, f_div = get_stats(frontier_alloc)
-        c_abs, c_apy, c_div = get_stats(car_alloc)
         l_abs, l_apy, l_div = get_stats(liquid_alloc)
 
-        # 6-Column High-Level Summary
+        # 5-Column High-Level Summary
         st.subheader("📋 Strategy Comparison")
         
         # Extract current APY early to use as reference for deltas
         current_blended = res_data['current_metrics']['blended_apy']
         
-        s_col0, s_col1, s_col2, s_col3, s_col4, s_col5 = st.columns(6)
+        s_col0, s_col1, s_col2, s_col3, s_col4 = st.columns(5)
         
         with s_col0:
             st.markdown("<h4 style='color:#9E9E9E; margin-bottom:0;'>Current</h4>", unsafe_allow_html=True)
@@ -890,11 +850,6 @@ if not df_selected.empty:
             st.caption(f"Diversity: **{f_div:.4f}**")
 
         with s_col4:
-            st.markdown("<h4 style='color:#7C4DFF; margin-bottom:0;'>Conc-Adj</h4>", unsafe_allow_html=True)
-            st.metric("APY", f"{c_apy:.2%}", delta=f"{(c_apy - current_blended):.2%}")
-            st.caption(f"Diversity: **{c_div:.4f}**")
-
-        with s_col5:
             st.markdown("<h4 style='color:#00E676; margin-bottom:0;'>Liquid-Yield</h4>", unsafe_allow_html=True)
             st.metric("APY", f"{l_apy:.2%}", delta=f"{(l_apy - current_blended):.2%}")
             st.caption(f"Diversity: **{l_div:.4f}**")
@@ -907,8 +862,8 @@ if not df_selected.empty:
             df_scatter = df_scatter.sample(MAX_SCATTER_PLOT_POINTS, random_state=42)
         
         # Updated Color Mapping
-        STRAT_DOMAIN = ['Best Yield', 'Whale Shield', 'Frontier', 'Conc-Adj', 'Liquid-Yield']
-        STRAT_RANGE = ['#F44336', '#2979FF', '#E040FB', '#7C4DFF', '#00E676'] 
+        STRAT_DOMAIN = ['Best Yield', 'Whale Shield', 'Frontier', 'Liquid-Yield']
+        STRAT_RANGE = ['#F44336', '#2979FF', '#E040FB', '#00E676'] 
         
         st.subheader("📊 Optimization Search Space")
         col_graph1, col_graph2 = st.columns(2)
@@ -918,9 +873,8 @@ if not df_selected.empty:
             
             highlights = pd.DataFrame([
                 {"Diversity Score": y_div, "Blended APY": y_apy, "Type": "Best Yield", "Size": 100},
-                {"Diversity Score": w_div, "Blended APY": w_apy, "Type": "Whale Shield", "Size": 100}, # NEW
+                {"Diversity Score": w_div, "Blended APY": w_apy, "Type": "Whale Shield", "Size": 100}, 
                 {"Diversity Score": f_div, "Blended APY": f_apy, "Type": "Frontier", "Size": 100},
-                {"Diversity Score": c_div, "Blended APY": c_apy, "Type": "Conc-Adj", "Size": 100},
                 {"Diversity Score": l_div, "Blended APY": l_apy, "Type": "Liquid-Yield", "Size": 100}
             ])
             
@@ -945,18 +899,16 @@ if not df_selected.empty:
             
             d1 = pd.DataFrame({"Iteration": range(len(traces['yield'])), "Value": traces['yield'], "Strategy": "Best Yield"})
             d2 = pd.DataFrame({"Iteration": range(len(traces['frontier'])), "Value": traces['frontier'], "Strategy": "Frontier"})
-            d3 = pd.DataFrame({"Iteration": range(len(traces['car'])), "Value": traces['car'], "Strategy": "Conc-Adj"})
             d4 = pd.DataFrame({"Iteration": range(len(traces['liquid'])), "Value": traces['liquid'], "Strategy": "Liquid-Yield"})
             d5 = pd.DataFrame({"Iteration": range(len(traces['whale'])), "Value": traces['whale'], "Strategy": "Whale Shield"})
             
             # Downsample each trace if it has too many points, to prevent UI lag
             if len(d1) > MAX_LINE_PLOT_POINTS_PER_STRATEGY: d1 = d1.sample(MAX_LINE_PLOT_POINTS_PER_STRATEGY, random_state=42)
             if len(d2) > MAX_LINE_PLOT_POINTS_PER_STRATEGY: d2 = d2.sample(MAX_LINE_PLOT_POINTS_PER_STRATEGY, random_state=43)
-            if len(d3) > MAX_LINE_PLOT_POINTS_PER_STRATEGY: d3 = d3.sample(MAX_LINE_PLOT_POINTS_PER_STRATEGY, random_state=44)
             if len(d4) > MAX_LINE_PLOT_POINTS_PER_STRATEGY: d4 = d4.sample(MAX_LINE_PLOT_POINTS_PER_STRATEGY, random_state=45)
             if len(d5) > MAX_LINE_PLOT_POINTS_PER_STRATEGY: d5 = d5.sample(MAX_LINE_PLOT_POINTS_PER_STRATEGY, random_state=46)
             
-            df_hist_long = pd.concat([d1, d2, d3, d4, d5])
+            df_hist_long = pd.concat([d1, d2, d4, d5])
             
             line_chart = alt.Chart(df_hist_long).mark_line().encode(
                 x='Iteration',
@@ -974,14 +926,12 @@ if not df_selected.empty:
             y_val = best_yield_alloc[idx]
             w_val = whale_alloc[idx]
             f_val = frontier_alloc[idx]
-            c_val = car_alloc[idx]
             l_val = liquid_alloc[idx]
             
-            if max(y_val, w_val, f_val, c_val, l_val) > 1:
+            if max(y_val, w_val, f_val, l_val) > 1:
                 bar_data.append({"Market": m_name, "Strategy": "Best Yield", "Alloc ($)": y_val})
                 bar_data.append({"Market": m_name, "Strategy": "Whale Shield", "Alloc ($)": w_val})
                 bar_data.append({"Market": m_name, "Strategy": "Frontier", "Alloc ($)": f_val})
-                bar_data.append({"Market": m_name, "Strategy": "Conc-Adj", "Alloc ($)": c_val})
                 bar_data.append({"Market": m_name, "Strategy": "Liquid-Yield", "Alloc ($)": l_val})
             
         if bar_data:
@@ -1006,7 +956,6 @@ if not df_selected.empty:
                 "Best Yield (Red)", 
                 "Whale Shield (Blue)", 
                 "Frontier (Magenta)", 
-                "Concentration-Adj (Purple)",
                 "Liquid-Yield (Green)"
             ],
             horizontal=True
@@ -1021,8 +970,6 @@ if not df_selected.empty:
                 st.warning(res_data['opt_object'].whale_warning)
         elif "Frontier" in strategy_choice:
             final_alloc = frontier_alloc
-        elif "Concentration" in strategy_choice:
-            final_alloc = car_alloc
         else:
             final_alloc = liquid_alloc
 
