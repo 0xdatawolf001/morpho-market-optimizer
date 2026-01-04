@@ -677,7 +677,8 @@ with col_param:
         min_value=-100.0, 
         max_value=100.0, 
         value=DEFAULT_HURDLE_RATE, 
-        step=0.1
+        step=0.1,
+        help='This is the tangency portfolio while accounting your minimal required rate of return. You can use ETH staking rate, AAVE safest pool rates etc.'
     )
 
     # NEW: Whale Shield Input
