@@ -1082,49 +1082,70 @@ if not df_selected.empty:
         results = []
         new_annual_interest = 0
         total_allocated_usd = 0.0
+        total_stuck_usd = 0.0
         
         for i, target_val in enumerate(final_alloc):
             m = market_data_list[i]
             total_allocated_usd += target_val
             
-            net_move = target_val - m['existing_balance_usd']
+            # Liquidity math for share calculation
+            user_current = m['existing_balance_usd']
+            current_avail = m.get('Available Liquidity (USD)', 0.0)
             
-            # 1. Capture Current APY
-            current_apy_val = m.get('current_supply_apy', 0.0)
-
-            # 2. Calculate Simulated APY
-            if abs(net_move) < 0.01:
-                new_apy = current_apy_val
+            # "Base Available" is pool liquidity excluding the user's current position
+            base_available = max(0, current_avail - user_current)
+            # "Final Available" is the total pool liquidity after the user's new target is applied
+            final_available = base_available + target_val
+            
+            liq_share = target_val / final_available if final_available > 0 else 0
+            
+            # Movement and Stuck logic
+            net_move = target_val - user_current
+            requested_withdrawal = max(0, -net_move)
+            
+            # How much we can actually pull out based on the snapshot
+            stuck_funds = max(0, requested_withdrawal - current_avail)
+            actual_withdrawable = requested_withdrawal - stuck_funds
+            
+            liquid_move = -actual_withdrawable if net_move < 0 else net_move
+            total_stuck_usd += stuck_funds
+            
+            # Action State Logic
+            if net_move > 0.01:
+                action = "🟢 DEPOSIT"
+            elif net_move < -0.01:
+                if actual_withdrawable <= 0.01:
+                    action = "⚠️ STUCK"
+                elif stuck_funds > 0.01:
+                    action = "🟠 PARTIAL"
+                else:
+                    action = "🔴 WITHDRAW"
             else:
-                new_apy = opt.simulate_apy(m, target_val)
+                action = "⚪ HOLD"
 
+            # APY Calculations
+            current_apy_val = m.get('current_supply_apy', 0.0)
+            new_apy = current_apy_val if abs(net_move) < 0.01 else opt.simulate_apy(m, target_val)
             new_annual_interest += (target_val * new_apy)
-            
-            if net_move > 0.01: action = "🟢 DEPOSIT"
-            elif net_move < -0.01: action = "🔴 WITHDRAW"
-            else: action = "⚪ HOLD"
 
-            # 3. Liquidity Calculations
-            orig_liq = m.get('Available Liquidity (USD)', 0.0)
-            final_liq = orig_liq + net_move
-            pct_final_liq = (target_val / final_liq) if final_liq > 0 else 0.0
-            
             results.append({
                 "Destination ID": str(m['Market ID'])[:7],
                 "Market": f"{m['Loan Token']}/{m['Collateral']}",
                 "Chain": m['Chain'], 
                 "Action": action,
                 "Weight": target_val / total_optimizable if total_optimizable > 0 else 0,
-                "Current ($)": m['existing_balance_usd'],
+                "Current ($)": user_current,
                 "Target ($)": target_val,
                 "Net Move ($)": net_move,
+                "Liquid Move ($)": liquid_move,
+                "Stuck Funds ($)": stuck_funds,
                 "Current APY": current_apy_val,
                 "Simulated APY": new_apy,
                 "Ann. Yield": target_val * new_apy,
-                "Initial Liq.": orig_liq,
-                "Final Liq.": final_liq,
-                "% Liq. Share": pct_final_liq,
-                "Market ID Full": m['Market ID'] # Keep full ID for logic
+                "Initial Liq.": current_avail,
+                "Final Liq.": final_available,
+                "% Liq. Share": liq_share,
+                "Market ID Full": m['Market ID']
             })
 
         # --- Check for Unallocated Capital ---
@@ -1162,12 +1183,13 @@ if not df_selected.empty:
         selected_weights = np.array([r['Weight'] for r in results])
         selected_diversity = 1.0 - np.sum(selected_weights**2)
 
-        m1, m2, m3, m4, m5 = st.columns(5) 
+        m1, m2, m3, m4, m5, m6 = st.columns(6) 
         m1.metric("Current APY", f"{current_blended:.4%}")
         m2.metric("Optimized APY", f"{new_blended_apy:.4%}", delta=f"{apy_diff*100:.3f}%")
         m3.metric("Total Wealth (1 Yr)", f"${total_optimizable + new_annual_interest:,.2f}")
-        m4.metric("Annual Interest Gain After Optimization", f"${interest_diff:,.2f}")
+        m4.metric("Annual Interest Gain", f"${interest_diff:,.2f}")
         m5.metric("Diversity Score", f"{selected_diversity:.4f}")
+        m6.metric("Stuck Capital", f"${total_stuck_usd:,.2f}", delta_color="inverse", delta="Liquidity Issue" if total_stuck_usd > 0 else None)
 
         # Row 2: Time-Based Earnings Breakdown
         st.markdown("---")
@@ -1183,36 +1205,27 @@ if not df_selected.empty:
         st.divider()
         st.subheader("⚖️ Allocations")
         df_res = df_res.sort_values(by=["Action", "Weight"], ascending=[False, False])
-
+        
         st.dataframe(
             df_res.style.format({
                 "Weight": "{:.2%}", 
                 "Current ($)": "${:,.2f}", 
                 "Target ($)": "${:,.2f}", 
                 "Net Move ($)": "${:,.2f}",
+                "Liquid Move ($)": "${:,.2f}",
+                "Stuck Funds ($)": "${:,.2f}",
                 "Current APY": "{:.4%}",
                 "Simulated APY": "{:.4%}",
                 "Ann. Yield": "${:,.2f}",
                 "Initial Liq.": "${:,.2f}",
                 "Final Liq.": "${:,.2f}",
-                "% Liq. Share": "{:.4%}",
+                "% Liq. Share": "{:.2%}",
                 "Contribution to Portfolio APY": "{:.4%}" 
             }), 
-            column_order=["Destination ID", 
-                          "Market", 
-                          "Chain", 
-                          "Action", 
-                          "Weight", 
-                          "Current ($)", 
-                          "Target ($)", 
-                          "Net Move ($)",
-                          "Current APY", 
-                          "Simulated APY", 
-                          "Ann. Yield",
-                          "Initial Liq.",
-                          "Final Liq.",
-                          "% Liq. Share",
-                          "Contribution to Portfolio APY"],
+            column_order=["Destination ID", "Market", "Chain", "Action", "Weight", 
+                          "Current ($)", "Target ($)", "Net Move ($)", "Liquid Move ($)", 
+                          "Stuck Funds ($)", "Current APY", "Simulated APY", "Ann. Yield", 
+                          "Initial Liq.", "Final Liq.", "% Liq. Share", "Contribution to Portfolio APY"],
             width='stretch', 
             hide_index=True
         )
@@ -1220,12 +1233,14 @@ if not df_selected.empty:
         st.divider()
         st.subheader("📋 Execution Plan", help = 'Gives you steps to rebalance')
 
+        # --- Update Execution Plan ---
         sources = []
-        withdraw_df = df_res[df_res["Net Move ($)"] < -0.01]
+        # Filter for rows where we are moving funds out AND there is liquid availability
+        withdraw_df = df_res[df_res["Liquid Move ($)"] < -0.01]
         for _, row in withdraw_df.iterrows():
             sources.append({
                 "name": row['Market'],
-                "available": abs(row['Net Move ($)']),
+                "available": abs(row['Liquid Move ($)']), # Only use what is liquid
                 "type": "Market"
             })
             
@@ -1241,6 +1256,10 @@ if not df_selected.empty:
                 "needed": row['Net Move ($)'],
                 "running_balance": row['Current ($)'] 
             })
+
+        # Logic for Stuck Warning in Plan
+        if total_stuck_usd > 0.01:
+            st.warning(f"⚠️ **Execution Limited by Liquidity:** ${total_stuck_usd:,.2f} of your intended withdrawals are currently stuck in markets with 0 liquidity. The steps below only cover available funds.")
 
         transfer_steps = []
         src_idx, dst_idx = 0, 0
