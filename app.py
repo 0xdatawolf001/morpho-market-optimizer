@@ -1088,25 +1088,33 @@ if not df_selected.empty:
             m = market_data_list[i]
             total_allocated_usd += target_val
             
-            # Liquidity math for share calculation
+            # --- UTILIZATION MATH ---
+            token_price = m['Price USD']
+            multiplier = 10**m['Decimals']
             user_current = m['existing_balance_usd']
+            
+            # Initial Util (from raw market data)
+            initial_util = m['raw_borrow'] / m['raw_supply'] if m['raw_supply'] > 0 else 0
+            
+            # Final Util (accounting for user's net change in supply)
+            user_existing_wei = (user_current / token_price) * multiplier if token_price > 0 else 0
+            target_wei = (target_val / token_price) * multiplier if token_price > 0 else 0
+            base_supply_wei = max(0, m['raw_supply'] - user_existing_wei)
+            simulated_total_supply_wei = base_supply_wei + target_wei
+            
+            final_util = m['raw_borrow'] / simulated_total_supply_wei if simulated_total_supply_wei > 0 else 0
+            
+            # --- LIQUIDITY MATH ---
             current_avail = m.get('Available Liquidity (USD)', 0.0)
-            
-            # "Base Available" is pool liquidity excluding the user's current position
             base_available = max(0, current_avail - user_current)
-            # "Final Available" is the total pool liquidity after the user's new target is applied
             final_available = base_available + target_val
-            
             liq_share = target_val / final_available if final_available > 0 else 0
             
             # Movement and Stuck logic
             net_move = target_val - user_current
             requested_withdrawal = max(0, -net_move)
-            
-            # How much we can actually pull out based on the snapshot
             stuck_funds = max(0, requested_withdrawal - current_avail)
             actual_withdrawable = requested_withdrawal - stuck_funds
-            
             liquid_move = -actual_withdrawable if net_move < 0 else net_move
             total_stuck_usd += stuck_funds
             
@@ -1134,6 +1142,8 @@ if not df_selected.empty:
                 "Chain": m['Chain'], 
                 "Action": action,
                 "Weight": target_val / total_optimizable if total_optimizable > 0 else 0,
+                "Initial Utilization": initial_util,    # NEW COLUMN
+                "Final Utilization": final_util,        # NEW COLUMN
                 "Current ($)": user_current,
                 "Target ($)": target_val,
                 "Net Move ($)": net_move,
@@ -1209,6 +1219,8 @@ if not df_selected.empty:
         st.dataframe(
             df_res.style.format({
                 "Weight": "{:.2%}", 
+                "Initial Utilization": "{:.2%}",      
+                "Final Utilization": "{:.2%}",        
                 "Current ($)": "${:,.2f}", 
                 "Target ($)": "${:,.2f}", 
                 "Net Move ($)": "${:,.2f}",
@@ -1223,6 +1235,7 @@ if not df_selected.empty:
                 "Contribution to Portfolio APY": "{:.4%}" 
             }), 
             column_order=["Destination ID", "Market", "Chain", "Action", "Weight", 
+                          "Initial Utilization", "Final Utilization", 
                           "Current ($)", "Target ($)", "Net Move ($)", "Liquid Move ($)", 
                           "Stuck Funds ($)", "Current APY", "Simulated APY", "Ann. Yield", 
                           "Initial Liq.", "Final Liq.", "% Liq. Share", "Contribution to Portfolio APY"],
