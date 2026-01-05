@@ -576,11 +576,11 @@ with col_scope:
         user_wallet = st.text_input("Auto-fill from Wallet Address", placeholder="0x...")
         
     with u_col2:
-        scan_clicked = st.button("Import From Wallet", type="secondary", use_container_width=True)
+        scan_clicked = st.button("Import From Wallet", type="primary", use_container_width=True)
 
     with u_col3:
         # NEW: Clear All button replaces Clear Wallet Markets
-        clear_all_clicked = st.button("Clear All", type="primary", use_container_width=True)
+        clear_all_clicked = st.button("Clear All", type="secondary", use_container_width=True)
 
     if "portfolio_input_text" not in st.session_state:
         st.session_state.portfolio_input_text = ""
