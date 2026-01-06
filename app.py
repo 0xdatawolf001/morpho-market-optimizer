@@ -368,7 +368,7 @@ class RebalanceOptimizer:
         self._record_attempt(y_val, div_val)
         self.frontier_trace.append(y_val) 
         return -(y_val * div_val) 
-
+    
     def objective_liquidity(self, x):
         norm_x, y_val, div_val = self._calculate_metrics(x)
         self._record_attempt(y_val, div_val)
@@ -384,11 +384,11 @@ class RebalanceOptimizer:
                 avail_liq = market.get('Available Liquidity (USD)', 0.0)
                 
                 # WEIGHT ADJUSTMENT: 
-                # Changed from math.log10 to math.sqrt. 
-                # This makes deep liquidity significantly more attractive to the solver 
-                # than small high-yield pools.
-                liq_weight = math.sqrt(max(1.0, avail_liq)) 
-                
+                # Changed from math.sqrt to math.log10.
+                # Using log10 makes the preference for deep liquidity much less aggressive,
+                # as the weight increases slowly as liquidity grows (e.g., $1M = 6, $10M = 7).
+                liq_weight = math.log10(max(10.0, avail_liq)) 
+                # liq_weight = math.sqrt(max(1.0, avail_liq))  # more conservative                
                 # The objective is to maximize (Allocation * APY * Liquidity Weight)
                 liq_score += (alloc * sim_apy * liq_weight)
         return -liq_score
@@ -473,9 +473,14 @@ class RebalanceOptimizer:
         res_frontier = minimize(self.objective_frontier, x0, method='SLSQP', bounds=standard_bounds, constraints=constraints, tol=1e-6, options=options)
         best_frontier_alloc = self._get_normalized_allocations(res_frontier.x)
         
-        # C. Liquidity Weighted
-        res_liq = minimize(self.objective_liquidity, x0, method='SLSQP', bounds=standard_bounds, constraints=constraints, tol=1e-6, options=options)
-        best_liquid_alloc = self._get_normalized_allocations(res_liq.x)
+        # C. Liquidity Weighted (UPDATED: Now uses whale_bounds)
+        res_liq = minimize(self.objective_liquidity, x0, method='SLSQP', bounds=whale_bounds, constraints=constraints, tol=1e-6, options=options)
+        
+        # Update Liquid logic to handle strict capacity like the Whale strategy
+        if not self.allow_overflow and total_whale_capacity < self.total_budget:
+             best_liquid_alloc = np.maximum(res_liq.x, 0)
+        else:
+             best_liquid_alloc = self._get_normalized_allocations(res_liq.x)
         
         # D. Whale Shield
         # If allow_overflow=True and capacity is hit, whale_bounds is now just standard_bounds
