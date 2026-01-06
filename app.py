@@ -770,9 +770,9 @@ with col_param:
     # NEW: Whale Shield Input
     max_dominance = st.number_input(
         "Whale Shield: Max Dominance %",
-        min_value=0.1,
-        max_value=100.0,
-        value=100.0,
+        min_value=0.001,
+        max_value=1000.0,
+        value=30.0,
         step=5.0,
         help="Hard limit: You will never own more than this % of a market's AVAILABLE liquidity (Supply - Borrow). Set to 100% to disable."
     )
