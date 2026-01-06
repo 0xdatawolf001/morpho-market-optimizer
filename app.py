@@ -1254,11 +1254,17 @@ if not df_selected.empty:
             sources.append({
                 "name": row['Market'],
                 "available": abs(row['Liquid Move ($)']), # Only use what is liquid
+                "running_balance": row['Current ($)'],    # Track the actual market balance
                 "type": "Market"
             })
             
         if new_cash > 0.01:
-            sources.append({ "name": "New Capital", "available": new_cash, "type": "Wallet" })
+            sources.append({ 
+                "name": "New Capital", 
+                "available": new_cash, 
+                "running_balance": new_cash, 
+                "type": "Wallet" 
+            })
             
         destinations = []
         deposit_df = df_res[df_res["Net Move ($)"] > 0.01]
@@ -1274,6 +1280,7 @@ if not df_selected.empty:
         stuck_df = df_res[df_res["Stuck Funds ($)"] > 0.01].copy()
         if not stuck_df.empty:
             st.warning(f"⚠️ **Execution Limited by Liquidity:** ${total_stuck_usd:,.2f} of your intended withdrawals are blocked. Markets below have insufficient exit liquidity:")
+            st.markdown("#### 1. Blocked Withdrawals (Liquidity Limited)")
             st.dataframe(
                 stuck_df[["Market", "Chain", "Current ($)", "Target ($)", "Initial Liq.", "Stuck Funds ($)"]]
                 .sort_values("Stuck Funds ($)", ascending=False)
@@ -1289,6 +1296,7 @@ if not df_selected.empty:
 
         transfer_steps = []
         src_idx, dst_idx = 0, 0
+        ordering_counter = 1
         
         # 1. Match Withdrawals/Cash to New Deposits
         while src_idx < len(sources) and dst_idx < len(destinations):
@@ -1297,12 +1305,17 @@ if not df_selected.empty:
             
             if amount_to_move > 0.01: 
                 dst['running_balance'] += amount_to_move
+                src['running_balance'] -= amount_to_move
+                
                 transfer_steps.append({
-                    "Destination ID": str(dst['id'])[:7],
+                    "Ordering": ordering_counter,
                     "From": src['name'],
                     "To": dst['name'],
-                    "Amount To Move ($)": amount_to_move
+                    "to (address)": str(dst['id'])[:7],
+                    "Amount to move ($)": amount_to_move,
+                    "Remaining Funds ($)": src['running_balance']
                 })
+                ordering_counter += 1
             
             src['available'] -= amount_to_move
             dst['needed'] -= amount_to_move
@@ -1310,22 +1323,40 @@ if not df_selected.empty:
             if src['available'] < 0.01: src_idx += 1
             if dst['needed'] < 0.01: dst_idx += 1
 
-# 2. Handle Leftover Sources (Market -> Wallet)
-        # If sources still have funds (available > 0) but destinations are full/empty, 
-        # that money goes to Wallet.
+        # 2. Handle Leftover Sources (Market -> Wallet)
         while src_idx < len(sources):
             src = sources[src_idx]
             if src['available'] > 0.01 and src['available'] >= min_move_thresh:
+                src['running_balance'] -= src['available']
                 transfer_steps.append({
-                    "Destination ID": "Wallet",
+                    "Ordering": ordering_counter,
                     "From": src['name'],
                     "To": "Wallet (Unallocated)",
-                    "Amount To Move ($)": src['available']
+                    "to (address)": "Wallet",
+                    "Amount to move ($)": src['available'],
+                    "Remaining Funds ($)": src['running_balance']
                 })
+                ordering_counter += 1
             src_idx += 1
 
         if transfer_steps:
+            st.markdown("#### 2. Market Rebalance Steps")
             df_actions = pd.DataFrame(transfer_steps)
-            st.dataframe(df_actions.style.format({"Amount To Move ($)": "${:,.2f}"}), width='stretch', hide_index=True)
+            
+            # Apply styling to the new "Remaining Funds ($)" column name
+            styled_df = df_actions.style.format({
+                "Amount to move ($)": "${:,.2f}",
+                "Remaining Funds ($)": "${:,.2f}"
+            }).applymap(
+                lambda x: 'color: #ff4b4b;' if (isinstance(x, (int, float)) and x <= 0.01) else '', 
+                subset=['Remaining Funds ($)']
+            )
+            
+            st.dataframe(
+                styled_df, 
+                column_order=["Ordering", "From", "To", "to (address)", "Amount to move ($)", "Remaining Funds ($)"],
+                width='stretch', 
+                hide_index=True
+            )
         else:
             st.success("✅ Portfolio is aligned with this strategy.")
