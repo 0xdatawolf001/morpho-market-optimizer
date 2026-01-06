@@ -551,6 +551,7 @@ df_filtered = df_filtered[
 st.dataframe(
     df_filtered, 
     column_config={
+        "Price (USD)": st.column_config.NumberColumn(format="dollar"),
         "Total Supply (USD)": st.column_config.NumberColumn(format="dollar"),
         "Total Borrow (USD)": st.column_config.NumberColumn(format="dollar"), 
         "Available Liquidity (USD)": st.column_config.NumberColumn(format="dollar"),
