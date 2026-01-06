@@ -1311,9 +1311,9 @@ if not df_selected.empty:
                     "Ordering": ordering_counter,
                     "From": src['name'],
                     "To": dst['name'],
-                    "to (address)": str(dst['id'])[:7],
+                    "To (address)": str(dst['id'])[:7],
                     "Amount to move ($)": amount_to_move,
-                    "Remaining Funds ($)": src['running_balance']
+                    "Remaining Funds In Source ($)": src['running_balance']
                 })
                 ordering_counter += 1
             
@@ -1332,9 +1332,9 @@ if not df_selected.empty:
                     "Ordering": ordering_counter,
                     "From": src['name'],
                     "To": "Wallet (Unallocated)",
-                    "to (address)": "Wallet",
+                    "To (address)": "Wallet",
                     "Amount to move ($)": src['available'],
-                    "Remaining Funds ($)": src['running_balance']
+                    "Remaining Funds In Source ($)": src['running_balance']
                 })
                 ordering_counter += 1
             src_idx += 1
@@ -1346,15 +1346,15 @@ if not df_selected.empty:
             # Apply styling to the new "Remaining Funds ($)" column name
             styled_df = df_actions.style.format({
                 "Amount to move ($)": "${:,.2f}",
-                "Remaining Funds ($)": "${:,.2f}"
+                "Remaining Funds In Source ($)": "${:,.2f}"
             }).applymap(
                 lambda x: 'color: #ff4b4b;' if (isinstance(x, (int, float)) and x <= 0.01) else '', 
-                subset=['Remaining Funds ($)']
+                subset=['Remaining Funds In Source ($)']
             )
             
             st.dataframe(
                 styled_df, 
-                column_order=["Ordering", "From", "To", "to (address)", "Amount to move ($)", "Remaining Funds ($)"],
+                column_order=["Ordering", "From", "To", "To (address)", "Amount to move ($)", "Remaining Funds In Source ($)"],
                 width='stretch', 
                 hide_index=True
             )
