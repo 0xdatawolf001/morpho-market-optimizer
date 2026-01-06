@@ -379,9 +379,18 @@ class RebalanceOptimizer:
             if alloc > 1.0: 
                 market = self.markets[i]
                 sim_apy = self.simulate_apy(market, alloc)
+                
+                # Available USD Liquidity
                 avail_liq = market.get('Available Liquidity (USD)', 0.0)
-                weight = math.log10(max(10.0, avail_liq)) 
-                liq_score += (alloc * sim_apy * weight)
+                
+                # WEIGHT ADJUSTMENT: 
+                # Changed from math.log10 to math.sqrt. 
+                # This makes deep liquidity significantly more attractive to the solver 
+                # than small high-yield pools.
+                liq_weight = math.sqrt(max(1.0, avail_liq)) 
+                
+                # The objective is to maximize (Allocation * APY * Liquidity Weight)
+                liq_score += (alloc * sim_apy * liq_weight)
         return -liq_score
 
     def objective_whale(self, x):
