@@ -1271,8 +1271,21 @@ if not df_selected.empty:
             })
 
         # Logic for Stuck Warning in Plan
-        if total_stuck_usd > 0.01:
-            st.warning(f"⚠️ **Execution Limited by Liquidity:** ${total_stuck_usd:,.2f} of your intended withdrawals are currently stuck in markets with 0 liquidity. The steps below only cover available funds.")
+        stuck_df = df_res[df_res["Stuck Funds ($)"] > 0.01].copy()
+        if not stuck_df.empty:
+            st.warning(f"⚠️ **Execution Limited by Liquidity:** ${total_stuck_usd:,.2f} of your intended withdrawals are blocked. Markets below have insufficient exit liquidity:")
+            st.dataframe(
+                stuck_df[["Market", "Chain", "Current ($)", "Target ($)", "Initial Liq.", "Stuck Funds ($)"]]
+                .sort_values("Stuck Funds ($)", ascending=False)
+                .style.format({
+                    "Current ($)": "${:,.2f}",
+                    "Target ($)": "${:,.2f}",
+                    "Initial Liq.": "${:,.2f}",
+                    "Stuck Funds ($)": "${:,.2f}"
+                }),
+                width='stretch',
+                hide_index=True
+            )
 
         transfer_steps = []
         src_idx, dst_idx = 0, 0
