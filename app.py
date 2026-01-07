@@ -812,10 +812,27 @@ if not df_selected.empty:
                         val = 0.0
                     st.session_state.balance_cache[m_id] = val
 
+# Locate the st.data_editor block and replace it with this version
     edited_df = st.data_editor(
-        df_selected[['Market ID', 'Chain', 'Loan Token', 'Collateral', 'Existing Balance (USD)']],
-        column_config={"Existing Balance (USD)": st.column_config.NumberColumn(format="dollar", min_value=0.0)},
-        disabled=['Market ID', 'Chain', 'Loan Token', 'Collateral'],
+        df_selected[[
+            'Market ID', 'Chain', 'Loan Token', 'Collateral', 
+            'Supply APY', 'Utilization', 'Total Supply (USD)', 
+            'Total Borrow (USD)', 'Available Liquidity (USD)', 
+            'Existing Balance (USD)'
+        ]],
+        column_config={
+            "Supply APY": st.column_config.NumberColumn(format="percent"),
+            "Utilization": st.column_config.NumberColumn(format="percent"),
+            "Total Supply (USD)": st.column_config.NumberColumn(format="dollar"),
+            "Total Borrow (USD)": st.column_config.NumberColumn(format="dollar"),
+            "Available Liquidity (USD)": st.column_config.NumberColumn(format="dollar"),
+            "Existing Balance (USD)": st.column_config.NumberColumn(format="dollar", min_value=0.0)
+        },
+        disabled=[
+            'Market ID', 'Chain', 'Loan Token', 'Collateral', 
+            'Supply APY', 'Utilization', 'Total Supply (USD)', 
+            'Total Borrow (USD)', 'Available Liquidity (USD)'
+        ],
         width='stretch', 
         hide_index=True, 
         key="portfolio_editor",
