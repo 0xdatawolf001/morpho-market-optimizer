@@ -533,12 +533,23 @@ with st.form("market_filter_form"):
     with f_col2: sel_loans = st.multiselect("Loan Tokens", options=loan_symbols)
     with f_col3: sel_colls = st.multiselect("Collateral Tokens", options=collateral_symbols)
     show_whitelisted = st.checkbox("Whitelisted?", value=False)
+    
     st.markdown("---")
+    # Metric Range Row 1: APY
     r1_c1, r1_c2 = st.columns(2)
     m_apy_in = r1_c1.number_input("Min APY %", 0.0, 200.0, 0.0)
-    x_apy_in = r1_c1.number_input("Max APY %", 0.0, 200.0, 200.0)
-    m_util_in = r1_c2.number_input("Min Util %", 0.0, 100.0, 0.0)
-    x_util_in = r1_c2.number_input("Max Util %", 0.0, 100.0, 100.0)
+    x_apy_in = r1_c2.number_input("Max APY %", 0.0, 200.0, 200.0)
+    
+    # Metric Range Row 2: Utilization
+    r2_c1, r2_c2 = st.columns(2)
+    m_util_in = r2_c1.number_input("Min Util %", 0.0, 100.0, 0.0)
+    x_util_in = r2_c2.number_input("Max Util %", 0.0, 100.0, 100.0)
+    
+    # Metric Row 3: Liquidity Thresholds
+    r3_c1, r3_c2 = st.columns(2)
+    m_supply_usd = r3_c1.number_input("Min Total Supply (USD)", 0.0, 1_000_000_000.0, 0.0, step=10000.0)
+    m_avail_usd = r3_c2.number_input("Min Available Liquidity (USD)", 0.0, 1_000_000_000.0, 0.0, step=10000.0)
+    
     apply_btn = st.form_submit_button("Apply Filters", type="primary", width='stretch')
 
 # --- FILTER APPLICATION ---
@@ -558,8 +569,10 @@ if show_whitelisted:
 df_filtered = df_filtered[
     (df_filtered['Supply APY'] >= (m_apy_in / 100.0)) & 
     (df_filtered['Supply APY'] <= (x_apy_in / 100.0)) &
-    (df_filtered['Utilization'] >= m_util_in) & 
-    (df_filtered['Utilization'] <= x_util_in)
+    (df_filtered['Utilization'] >= m_util_in / 100.0) & 
+    (df_filtered['Utilization'] <= x_util_in / 100.0) &
+    (df_filtered['Total Supply (USD)'] >= m_supply_usd) &
+    (df_filtered['Available Liquidity (USD)'] >= m_avail_usd)
 ]
 
 st.dataframe(
@@ -572,6 +585,11 @@ st.dataframe(
         "Supply APY": st.column_config.NumberColumn(format="percent"),  
         "Utilization": st.column_config.NumberColumn(format="percent"), 
     },
+    column_order=[
+        "Market ID", "Chain", "Loan Token", "Collateral", "Price USD", 
+        "Supply APY", "Utilization", "Total Supply (USD)", 
+        "Total Borrow (USD)", "Available Liquidity (USD)", "Whitelisted"
+    ],
     width="stretch", 
     hide_index=True
 )
