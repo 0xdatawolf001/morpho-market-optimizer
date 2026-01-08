@@ -277,75 +277,6 @@ def fetch_user_positions(user_address):
         
     return positions
 
-def fetch_market_momentum(selected_df):
-    """
-    Fetches 31 days of history. 
-    Calculates 1D, 7D, 30D % growth for Supply, Borrow, and derived Liquidity.
-    Returns values as whole numbers (e.g. 4.40 for 4.4%) for descriptive labels.
-    """
-    if selected_df.empty:
-        return pd.DataFrame()
-
-    momentum_data = []
-    start_ts = int(time.time()) - (31 * 24 * 60 * 60)
-    history_bar = st.progress(0, text="Calculating historical trends...")
-    
-    query = """
-    query GetMarketHistory($uniqueKey: String!, $chainId: Int!, $start: Int!) {
-      marketByUniqueKey(uniqueKey: $uniqueKey, chainId: $chainId) {
-        historicalState {
-          supplyAssets(options: {startTimestamp: $start, interval: DAY}) { y }
-          borrowAssets(options: {startTimestamp: $start, interval: DAY}) { y }
-        }
-      }
-    }
-    """
-
-    for i, (_, row) in enumerate(selected_df.iterrows()):
-        try:
-            resp = requests.post(MORPHO_API_URL, json={'query': query, 'variables': {
-                "uniqueKey": row['Market ID'], "chainId": int(row['ChainID']), "start": start_ts
-            }})
-            hist = resp.json().get('data', {}).get('marketByUniqueKey', {}).get('historicalState', {})
-            s_series = [float(x['y']) for x in hist.get('supplyAssets', [])]
-            b_series = [float(x['y']) for x in hist.get('borrowAssets', [])]
-
-            min_len = min(len(s_series), len(b_series))
-            if min_len < 2:
-                momentum_data.append({"Market ID": row['Market ID']})
-                continue
-
-            s_vals = s_series[-min_len:]
-            b_vals = b_series[-min_len:]
-            l_vals = [max(0, s - b) for s, b in zip(s_vals, b_vals)]
-
-            def get_deltas(vals):
-                curr = vals[-1]
-                def pct(past_idx):
-                    if len(vals) < abs(past_idx): return 0.0
-                    past = vals[past_idx]
-                    # Compute as whole percent number (e.g. 10.5 for 10.5%)
-                    return ((curr - past) / past) * 100 if past > 0 else 0.0
-                return pct(-2), pct(-8), pct(0)
-
-            s1, s7, s30 = get_deltas(s_vals)
-            b1, b7, b30 = get_deltas(b_vals)
-            l1, l7, l30 = get_deltas(l_vals)
-
-            momentum_data.append({
-                "Market ID": row['Market ID'],
-                "Supply 1D Growth %": s1, "Supply 7D Growth %": s7, "Supply 30D Growth %": s30,
-                "Borrow 1D Growth %": b1, "Borrow 7D Growth %": b7, "Borrow 30D Growth %": b30,
-                "Liquidity 1D Growth %": l1, "Liquidity 7D Growth %": l7, "Liquidity 30D Growth %": l30
-            })
-        except Exception as e:
-            print(f"Error fetching momentum data for {row['Market ID']}: {e}")
-            
-        history_bar.progress((i + 1) / len(selected_df))
-    
-    history_bar.empty()
-    return pd.DataFrame(momentum_data)
-
 # ==========================================
 # 3. OPTIMIZER
 # ==========================================
@@ -877,17 +808,13 @@ with col_param:
     )
 
 if not df_selected.empty:
-    # 1. Fetch Momentum Metrics
-    df_mom = fetch_market_momentum(df_selected)
-    
-    # 2. Merge Momentum with Selection (Source data from df_all)
-    if not df_mom.empty:
-        df_selected = pd.merge(df_selected, df_mom, on='Market ID', how='left').fillna(0.0)
+    # Yellow box st.info removed per request
 
-    # 3. Map Balances
+    # 1. Ensure current state is mapped to the dataframe
     df_selected['Existing Balance (USD)'] = df_selected['Market ID'].apply(
         lambda x: st.session_state.balance_cache.get(x, 0.0)
     )
+
     df_selected = df_selected.sort_values(by='Existing Balance (USD)', ascending=False)
 
     def sync_portfolio_edits():
@@ -896,38 +823,34 @@ if not df_selected.empty:
             for idx, changes in edits.items():
                 if "Existing Balance (USD)" in changes:
                     m_id = df_selected.iloc[idx]['Market ID']
-                    st.session_state.balance_cache[m_id] = float(changes["Existing Balance (USD)"] or 0.0)
+                    raw_val = changes["Existing Balance (USD)"]
+                    try:
+                        val = float(raw_val) if raw_val is not None else 0.0
+                    except (ValueError, TypeError):
+                        val = 0.0
+                    st.session_state.balance_cache[m_id] = val
 
-    # 4. Column Setup
-    id_cols = ['Market ID', 'Loan Token', 'Collateral']
-    core_cols = ['Supply APY', 'Utilization', 'Total Supply (USD)', 'Total Borrow (USD)', 'Available Liquidity (USD)']
-    growth_cols = [
-        "Supply 1D Growth %", "Supply 7D Growth %", "Supply 30D Growth %", 
-        "Borrow 1D Growth %", "Borrow 7D Growth %", "Borrow 30D Growth %", 
-        "Liquidity 1D Growth %", "Liquidity 7D Growth %", "Liquidity 30D Growth %"
-    ]
-    
-    display_cols = id_cols + core_cols + growth_cols + ['Existing Balance (USD)']
-
-    st.markdown("#### ⚖️ Unified Market Analysis & Portfolio Scope")
-    st.caption("Review ID, tokens, live metrics, and historical growth trends to manage your portfolio.")
-    
+# Locate the st.data_editor block and replace it with this version
     edited_df = st.data_editor(
-        df_selected[display_cols],
+        df_selected[[
+            'Market ID', 'Chain', 'Loan Token', 'Collateral', 
+            'Supply APY', 'Utilization', 'Total Supply (USD)', 
+            'Total Borrow (USD)', 'Available Liquidity (USD)', 
+            'Existing Balance (USD)'
+        ]],
         column_config={
-            "Market ID": st.column_config.TextColumn(width="small"),
-            "Loan Token": st.column_config.TextColumn(width="small"),
-            "Collateral": st.column_config.TextColumn(width="small"),
-            "Supply APY": st.column_config.NumberColumn(format="percent"), # Decimal from API (0.05 -> 5%)
-            "Utilization": st.column_config.NumberColumn(format="percent"), # Decimal from API (0.90 -> 90%)
+            "Supply APY": st.column_config.NumberColumn(format="percent"),
+            "Utilization": st.column_config.NumberColumn(format="percent"),
             "Total Supply (USD)": st.column_config.NumberColumn(format="dollar"),
             "Total Borrow (USD)": st.column_config.NumberColumn(format="dollar"),
             "Available Liquidity (USD)": st.column_config.NumberColumn(format="dollar"),
-            "Existing Balance (USD)": st.column_config.NumberColumn(format="dollar", min_value=0.0),
-            # Growth metrics are whole numbers from the function (e.g. 4.40 -> 4.40%)
-            **{c: st.column_config.NumberColumn(format="%.2f%%") for c in growth_cols}
+            "Existing Balance (USD)": st.column_config.NumberColumn(format="dollar", min_value=0.0)
         },
-        disabled=id_cols + core_cols + growth_cols,
+        disabled=[
+            'Market ID', 'Chain', 'Loan Token', 'Collateral', 
+            'Supply APY', 'Utilization', 'Total Supply (USD)', 
+            'Total Borrow (USD)', 'Available Liquidity (USD)'
+        ],
         width='stretch', 
         hide_index=True, 
         key="portfolio_editor",
