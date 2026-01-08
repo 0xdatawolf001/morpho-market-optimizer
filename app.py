@@ -277,7 +277,6 @@ def fetch_user_positions(user_address):
         
     return positions
 
-@st.cache_data(ttl=600)
 def fetch_market_momentum(selected_df):
     """
     Fetches 31 days of history. 
