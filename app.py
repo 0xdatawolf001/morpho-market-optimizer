@@ -1296,13 +1296,14 @@ if not df_selected.empty:
         st.divider()
         st.subheader("📋 Execution Plan", help = 'Gives you steps to rebalance')
 
-        # --- Update Execution Plan ---
+    # --- Update Execution Plan ---
         sources = []
         # Filter for rows where we are moving funds out AND there is liquid availability
         withdraw_df = df_res[df_res["Liquid Move ($)"] < -0.01]
         for _, row in withdraw_df.iterrows():
             sources.append({
                 "name": row['Market'],
+                "chain": row['Chain'],
                 "available": abs(row['Liquid Move ($)']), # Only use what is liquid
                 "running_balance": row['Current ($)'],    # Track the actual market balance
                 "type": "Market"
@@ -1311,6 +1312,7 @@ if not df_selected.empty:
         if new_cash > 0.01:
             sources.append({ 
                 "name": "New Capital", 
+                "chain": "Wallet",
                 "available": new_cash, 
                 "running_balance": new_cash, 
                 "type": "Wallet" 
@@ -1322,6 +1324,7 @@ if not df_selected.empty:
             destinations.append({
                 "id": row['Market ID Full'],
                 "name": row['Market'],
+                "chain": row['Chain'],
                 "needed": row['Net Move ($)'],
                 "running_balance": row['Current ($)'] 
             })
@@ -1360,7 +1363,9 @@ if not df_selected.empty:
                 transfer_steps.append({
                     "Ordering": ordering_counter,
                     "From": src['name'],
+                    "From (Chain)": src['chain'],
                     "To": dst['name'],
+                    "To (Chain)": dst['chain'],
                     "To (address)": str(dst['id'])[:7],
                     "Amount to move ($)": amount_to_move,
                     "Remaining Funds In Source ($)": src['running_balance']
@@ -1381,7 +1386,9 @@ if not df_selected.empty:
                 transfer_steps.append({
                     "Ordering": ordering_counter,
                     "From": src['name'],
+                    "From (Chain)": src['chain'],
                     "To": "Wallet (Unallocated)",
+                    "To (Chain)": "Wallet",
                     "To (address)": "Wallet",
                     "Amount to move ($)": src['available'],
                     "Remaining Funds In Source ($)": src['running_balance']
@@ -1404,7 +1411,14 @@ if not df_selected.empty:
             
             st.dataframe(
                 styled_df, 
-                column_order=["Ordering", "From", "To", "To (address)", "Amount to move ($)", "Remaining Funds In Source ($)"],
+                column_order=[
+                    "Ordering", 
+                    "From", "From (Chain)", 
+                    "To", "To (Chain)", 
+                    "To (address)", 
+                    "Amount to move ($)", 
+                    "Remaining Funds In Source ($)"
+                ],
                 width='stretch', 
                 hide_index=True
             )
