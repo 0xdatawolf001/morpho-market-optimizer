@@ -1053,11 +1053,26 @@ if not df_selected.empty:
             d4 = pd.DataFrame({"Iteration": range(len(traces['liquid'])), "Value": traces['liquid'], "Strategy": "Liquid-Yield"})
             d5 = pd.DataFrame({"Iteration": range(len(traces['whale'])), "Value": traces['whale'], "Strategy": "Whale Shield"})
             
-            # Downsample each trace if it has too many points, to prevent UI lag
-            if len(d1) > MAX_LINE_PLOT_POINTS_PER_STRATEGY: d1 = d1.sample(MAX_LINE_PLOT_POINTS_PER_STRATEGY, random_state=42)
-            if len(d2) > MAX_LINE_PLOT_POINTS_PER_STRATEGY: d2 = d2.sample(MAX_LINE_PLOT_POINTS_PER_STRATEGY, random_state=43)
-            if len(d4) > MAX_LINE_PLOT_POINTS_PER_STRATEGY: d4 = d4.sample(MAX_LINE_PLOT_POINTS_PER_STRATEGY, random_state=45)
-            if len(d5) > MAX_LINE_PLOT_POINTS_PER_STRATEGY: d5 = d5.sample(MAX_LINE_PLOT_POINTS_PER_STRATEGY, random_state=46)
+            # Downsample each trace if it has too many points, THEN SORT
+            if len(d1) > MAX_LINE_PLOT_POINTS_PER_STRATEGY: 
+                d1 = d1.sample(MAX_LINE_PLOT_POINTS_PER_STRATEGY, random_state=42).sort_values('Iteration')
+            else:
+                d1 = d1.sort_values('Iteration')
+
+            if len(d2) > MAX_LINE_PLOT_POINTS_PER_STRATEGY: 
+                d2 = d2.sample(MAX_LINE_PLOT_POINTS_PER_STRATEGY, random_state=43).sort_values('Iteration')
+            else:
+                d2 = d2.sort_values('Iteration')
+
+            if len(d4) > MAX_LINE_PLOT_POINTS_PER_STRATEGY: 
+                d4 = d4.sample(MAX_LINE_PLOT_POINTS_PER_STRATEGY, random_state=45).sort_values('Iteration')
+            else:
+                d4 = d4.sort_values('Iteration')
+
+            if len(d5) > MAX_LINE_PLOT_POINTS_PER_STRATEGY: 
+                d5 = d5.sample(MAX_LINE_PLOT_POINTS_PER_STRATEGY, random_state=46).sort_values('Iteration')
+            else:
+                d5 = d5.sort_values('Iteration')
             
             df_hist_long = pd.concat([d1, d2, d4, d5])
             
