@@ -20,8 +20,8 @@ CURVE_STEEPNESS = 4.0
 SECONDS_PER_YEAR = 31536000
 
 # Chart Performance Constants (NEW)
-MAX_SCATTER_PLOT_POINTS = 50000 # Max points for the Efficiency Frontier plot
-MAX_LINE_PLOT_POINTS_PER_STRATEGY = 10000 # Max points per strategy for the Solver Convergence plot
+MAX_SCATTER_PLOT_POINTS = 5000 # Max points for the Efficiency Frontier plot
+MAX_LINE_PLOT_POINTS_PER_STRATEGY = 1000 # Max points per strategy for the Solver Convergence plot
 
 # For text box
 # Separator Constant
@@ -537,8 +537,8 @@ with st.form("market_filter_form"):
     st.markdown("---")
     # Metric Range Row 1: APY
     r1_c1, r1_c2 = st.columns(2)
-    m_apy_in = r1_c1.number_input("Min APY %", 0.0, 200.0, 0.0)
-    x_apy_in = r1_c2.number_input("Max APY %", 0.0, 200.0, 200.0)
+    m_apy_in = r1_c1.number_input("Min APY %", 0.0, 1000.0, 0.0, step=0.5)
+    x_apy_in = r1_c2.number_input("Max APY %", 0.0, 1000.0, 1000.0, step=0.5)
     
     # Metric Range Row 2: Utilization
     r2_c1, r2_c2 = st.columns(2)
@@ -547,8 +547,8 @@ with st.form("market_filter_form"):
     
     # Metric Row 3: Liquidity Thresholds
     r3_c1, r3_c2 = st.columns(2)
-    m_supply_usd = r3_c1.number_input("Min Total Supply (USD)", 0.0, 1_000_000_000.0, 0.0, step=10000.0)
-    m_avail_usd = r3_c2.number_input("Min Available Liquidity (USD)", 0.0, 1_000_000_000.0, 0.0, step=10000.0)
+    m_supply_usd = r3_c1.number_input("Min Total Supply (USD)", 0.0, 10_000_000_000.0, 0.0, step=100000.0)
+    m_avail_usd = r3_c2.number_input("Min Available Liquidity (USD)", 0.0, 10_000_000_000.0, 0.0, step=100000.0)
     
     apply_btn = st.form_submit_button("Apply Filters", type="primary", width='stretch')
 
