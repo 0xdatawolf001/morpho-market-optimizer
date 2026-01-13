@@ -282,17 +282,18 @@ def fetch_user_positions(user_address):
 # ==========================================
 
 class RebalanceOptimizer:
-    def __init__(self, total_budget, market_list, max_dominance_pct=100.0, allow_overflow=False):
+    def __init__(self, total_budget, market_list, max_dominance_pct=100.0, max_port_alloc_pct=100.0, allow_overflow=False):
         self.total_budget = total_budget 
         self.markets = market_list
         self.max_dominance_ratio = max_dominance_pct / 100.0 
+        self.max_port_alloc_ratio = max_port_alloc_pct / 100.0
         self.allow_overflow = allow_overflow 
         
         self.yield_trace = []    
         self.frontier_trace = [] 
         self.liquid_trace = []
         self.whale_trace = []
-        self.whale_warning = None 
+        self.capacity_warning = None 
         
         self.all_attempts = []   
 
@@ -332,6 +333,9 @@ class RebalanceOptimizer:
         x = np.maximum(x, 0)
         sum_x = np.sum(x)
         if sum_x == 0: return x 
+        # Only normalize if we are not strictly capped by safety constraints
+        if not self.allow_overflow and sum_x < (self.total_budget - 0.01):
+            return x
         return x * (self.total_budget / sum_x)
 
     def _calculate_metrics(self, x):
@@ -355,8 +359,6 @@ class RebalanceOptimizer:
             "Type": "Explored" 
         })
 
-    # --- Objectives ---
-    
     def objective_yield(self, x):
         norm_x, y_val, div_val = self._calculate_metrics(x)
         self._record_attempt(y_val, div_val)
@@ -373,23 +375,13 @@ class RebalanceOptimizer:
         norm_x, y_val, div_val = self._calculate_metrics(x)
         self._record_attempt(y_val, div_val)
         self.liquid_trace.append(y_val)
-        
         liq_score = 0
         for i, alloc in enumerate(norm_x):
             if alloc > 1.0: 
                 market = self.markets[i]
                 sim_apy = self.simulate_apy(market, alloc)
-                
-                # Available USD Liquidity
                 avail_liq = market.get('Available Liquidity (USD)', 0.0)
-                
-                # WEIGHT ADJUSTMENT: 
-                # Changed from math.sqrt to math.log10.
-                # Using log10 makes the preference for deep liquidity much less aggressive,
-                # as the weight increases slowly as liquidity grows (e.g., $1M = 6, $10M = 7).
                 liq_weight = math.log10(max(10.0, avail_liq)) 
-                # liq_weight = math.sqrt(max(1.0, avail_liq))  # more conservative                
-                # The objective is to maximize (Allocation * APY * Liquidity Weight)
                 liq_score += (alloc * sim_apy * liq_weight)
         return -liq_score
 
@@ -403,22 +395,24 @@ class RebalanceOptimizer:
         n = len(self.markets)
         if n == 0: return None, None, None, None
         
-        # --- 1. Define Standard Bounds ---
+        # --- 1. Define Combined Bounds ---
         standard_bounds = []
         whale_bounds = []
         
-        # Calculate bounds for "Whale Shield"
-        # Formula: Alloc <= BaseAvailable * (Target% / (1 - Target%))
+        # Portfolio Cap (USD)
+        port_cap_usd = self.total_budget * self.max_port_alloc_ratio
+        
+        # Whale Shield Logic
         if self.max_dominance_ratio >= 0.99:
-            cap_factor = float('inf')
+            whale_cap_factor = float('inf')
         else:
-            cap_factor = self.max_dominance_ratio / (1.0 - self.max_dominance_ratio)
+            whale_cap_factor = self.max_dominance_ratio / (1.0 - self.max_dominance_ratio)
 
         for m in self.markets:
-            # Standard Bound (Budget only)
-            standard_bounds.append((0.0, self.total_budget))
+            # A. Standard Bound: Min(Budget, Portfolio Cap)
+            standard_bounds.append((0.0, min(self.total_budget, port_cap_usd)))
             
-            # Whale Bound (Available Liquidity)
+            # B. Whale Bound: Min(Budget, Portfolio Cap, Liquidity Shield)
             token_price = m.get('Price USD', 0)
             multiplier = 10**m.get('Decimals', 18)
             user_existing_usd = m.get('existing_balance_usd', 0.0)
@@ -426,73 +420,49 @@ class RebalanceOptimizer:
             
             total_supply_wei = m.get('raw_supply', 0)
             total_borrow_wei = m.get('raw_borrow', 0)
-            
-            # Available Liquidity = Supply - Borrow
             current_available_wei = max(0, total_supply_wei - total_borrow_wei)
-            
-            # Base Available = Current Liquidity - User's Current Liquidity
             base_available_wei = max(0, current_available_wei - user_existing_wei)
-            
             base_available_usd = (base_available_wei / multiplier) * token_price if token_price > 0 else 0
             
-            # Cap Calculation
-            strict_cap = base_available_usd * cap_factor
+            liq_shield_cap = base_available_usd * whale_cap_factor
             
-            # Bound is min of Budget or Strict Cap
-            whale_bounds.append((0.0, min(self.total_budget, strict_cap)))
+            whale_bounds.append((0.0, min(self.total_budget, port_cap_usd, liq_shield_cap)))
 
-        # --- Check for Whale Overflow ---
-        total_whale_capacity = sum([b[1] for b in whale_bounds])
+        # --- Capacity Checks & Warnings ---
+        total_standard_cap = sum([b[1] for b in standard_bounds])
+        total_whale_cap = sum([b[1] for b in whale_bounds])
         
-        if total_whale_capacity < self.total_budget:
+        if total_whale_cap < (self.total_budget):
             if self.allow_overflow:
-                # User allows ignoring the shield constraint if needed
-                self.whale_warning = (
-                    f"⚠️ **Shield Ignored:** Total Budget (${self.total_budget:,.0f}) exceeds the strictly safe liquidity capacity "
-                    f"(${total_whale_capacity:,.0f}). Optimization reverted to standard bounds for the Whale Strategy."
+                self.capacity_warning = (
+                    f"⚠️ **Safety Limits Ignored:** Total Budget (\${self.total_budget:,.0f}) exceeds your safety caps. "
+                    "Optimizer reverted to standard bounds to ensure full investment."
                 )
-                whale_bounds = standard_bounds
+                whale_bounds = [(0.0, self.total_budget)] * n
+                standard_bounds = [(0.0, self.total_budget)] * n
             else:
-                # User enforces the shield. 
-                # Note: SLSQP with Equality Constraint (Sum = Budget) will likely FAIL or return partials if bounds are too tight.
-                self.whale_warning = (
-                    f"⚠️ **Liquidity Capped:** Total Budget (\${self.total_budget:,.0f}) exceeds the safe liquidity capacity "
-                    f"(\${total_whale_capacity:,.0f}). The solver may fail to allocate the full budget."
+                self.capacity_warning = (
+                    f"⚠️ **Budget Limited by Safety Caps:** Your total budget (\${self.total_budget:,.0f}) exceeds the "
+                    f"combined capacity of your chosen markets (\${total_whale_cap:,.0f}) under current safety rules. "
+                    "Some cash will remain unallocated."
                 )
 
-        # --- 2. Setup Solver ---
         x0 = np.full(n, self.total_budget / n)
         constraints = ({'type': 'eq', 'fun': lambda x: np.sum(x) - self.total_budget})
         options = {'maxiter': 5000, 'ftol': 1e-6}
 
-        # A. Best Yield
-        res_yield = minimize(self.objective_yield, x0, method='SLSQP', bounds=standard_bounds, constraints=constraints, tol=1e-6, options=options)
+        # Optimizer execution
+        res_yield = minimize(self.objective_yield, x0, method='SLSQP', bounds=standard_bounds, constraints=constraints, options=options)
         best_yield_alloc = self._get_normalized_allocations(res_yield.x)
 
-        # B. Frontier
-        res_frontier = minimize(self.objective_frontier, x0, method='SLSQP', bounds=standard_bounds, constraints=constraints, tol=1e-6, options=options)
+        res_frontier = minimize(self.objective_frontier, x0, method='SLSQP', bounds=standard_bounds, constraints=constraints, options=options)
         best_frontier_alloc = self._get_normalized_allocations(res_frontier.x)
         
-        # C. Liquidity Weighted (UPDATED: Now uses whale_bounds)
-        res_liq = minimize(self.objective_liquidity, x0, method='SLSQP', bounds=whale_bounds, constraints=constraints, tol=1e-6, options=options)
+        res_liq = minimize(self.objective_liquidity, x0, method='SLSQP', bounds=whale_bounds, constraints=constraints, options=options)
+        best_liquid_alloc = self._get_normalized_allocations(res_liq.x)
         
-        # Update Liquid logic to handle strict capacity like the Whale strategy
-        if not self.allow_overflow and total_whale_capacity < self.total_budget:
-             best_liquid_alloc = np.maximum(res_liq.x, 0)
-        else:
-             best_liquid_alloc = self._get_normalized_allocations(res_liq.x)
-        
-        # D. Whale Shield
-        # If allow_overflow=True and capacity is hit, whale_bounds is now just standard_bounds
-        res_whale = minimize(self.objective_whale, x0, method='SLSQP', bounds=whale_bounds, constraints=constraints, tol=1e-6, options=options)
-        
-        # If the solver "failed" (likely due to strict bounds vs budget equality), we still try to get the allocation
-        # But we don't normalize it to the budget if it physically couldn't fit.
-        if not self.allow_overflow and total_whale_capacity < self.total_budget:
-             # Strict mode: Take raw X. If sum(X) < Budget, that implies "Unallocated Cash".
-             best_whale_alloc = np.maximum(res_whale.x, 0)
-        else:
-             best_whale_alloc = self._get_normalized_allocations(res_whale.x)
+        res_whale = minimize(self.objective_whale, x0, method='SLSQP', bounds=whale_bounds, constraints=constraints, options=options)
+        best_whale_alloc = self._get_normalized_allocations(res_whale.x)
         
         return best_yield_alloc, best_frontier_alloc, best_liquid_alloc, best_whale_alloc
     
@@ -785,14 +755,24 @@ with col_param:
     st.subheader("3. Parameters")
     new_cash = st.number_input("Additional New Cash (USD)", value=0.0, step=1000.0)
 
-    # NEW: Whale Shield Input
+    # NEW: Portfolio Cap
+    max_port_alloc = st.number_input(
+        "Max Portfolio Allocation %",
+        min_value=0.01,
+        max_value=100.0,
+        value=100.0,
+        step=5.0,
+        help="Hard safety limit: No single market can ever exceed this % of your TOTAL portfolio. Useful for capping protocol risk."
+    )
+
+    # Whale Shield Input
     max_dominance = st.number_input(
         "Whale Shield: Max Dominance %",
         min_value=0.001,
         max_value=1000.0,
         value=30.0,
         step=5.0,
-        help="Hard limit: You will never own more than this % of a market's AVAILABLE liquidity (Supply - Borrow). Set to 100% to disable."
+        help="Hard liquidity limit: You will never own more than this % of a market's AVAILABLE liquidity (Supply - Borrow)."
     )
 
     min_move_thresh = st.number_input(
@@ -802,9 +782,9 @@ with col_param:
     )
 
     allow_break = st.checkbox(
-        "Allow Whale Shield Overflow?",
+        "Allow Safety Cap Overflow?",
         value=False,
-        help="If your Budget > Safe Liquidity Limits, allow the optimizer to ignore the limits (unsafe) to ensure all money is invested. If unchecked, it will leave cash unallocated. Checking this ignores the max allocation per market constraint"
+        help="If checked, the optimizer will ignore both Whale Shield and Portfolio Caps to ensure all money is invested. Useful if your safety rules are too strict for your budget size."
     )
 
 if not df_selected.empty:
@@ -911,8 +891,14 @@ if not df_selected.empty:
         current_annual_interest = sum(m['existing_balance_usd'] * m['current_supply_apy'] for m in market_data_list)
         current_blended_apy = current_annual_interest / current_wealth if current_wealth > 0 else 0.0
 
-        # Pass max_dominance and allow_overflow to Optimizer
-        opt = RebalanceOptimizer(total_optimizable, market_data_list, max_dominance, allow_break)
+        # Pass max_dominance, max_port_alloc, and allow_overflow to Optimizer
+        opt = RebalanceOptimizer(
+            total_optimizable, 
+            market_data_list, 
+            max_dominance, 
+            max_port_alloc, 
+            allow_break
+        )
         
         # Unpack 4 results
         r_yield, r_frontier, r_liquid, r_whale = opt.optimize()
@@ -1133,9 +1119,9 @@ if not df_selected.empty:
             final_alloc = best_yield_alloc
         elif "Whale" in strategy_choice:
             final_alloc = whale_alloc
-            # Check for specific Whale Shield warnings
-            if hasattr(res_data['opt_object'], 'whale_warning') and res_data['opt_object'].whale_warning:
-                st.warning(res_data['opt_object'].whale_warning)
+            # Show capacity warnings if they exist
+            if hasattr(res_data['opt_object'], 'capacity_warning') and res_data['opt_object'].capacity_warning:
+                st.warning(res_data['opt_object'].capacity_warning)
         elif "Frontier" in strategy_choice:
             final_alloc = frontier_alloc
         elif "Liquid" in strategy_choice:
