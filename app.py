@@ -179,8 +179,6 @@ def get_market_dictionary():
     for m in all_items:
         loan = m.get('loanAsset') or {}
         state = m.get('state') or {}
-        chain_id = loan.get('chain', {}).get('id')
-        market_id = m['uniqueKey']
         
         def safe_float(value, default=0.0):
             if value is None: return default
@@ -194,14 +192,13 @@ def get_market_dictionary():
         price_usd = safe_float(loan.get('priceUsd'), default=1.0)
         
         processed.append({
-            "Market ID": market_id,
-            "Link To Market": f"https://www.monarchlend.xyz/market/{chain_id}/{market_id}",
-            "Chain": CHAIN_ID_TO_NAME.get(chain_id, "Other"),
+            "Market ID": m['uniqueKey'],
+            "Chain": CHAIN_ID_TO_NAME.get(loan.get('chain', {}).get('id'), "Other"),
             "Loan Token": loan.get('symbol'),
             "Collateral": (m.get('collateralAsset') or {}).get('symbol'),
             "Decimals": loan.get('decimals'),
             "Price USD": price_usd,
-            "ChainID": chain_id,
+            "ChainID": loan.get('chain', {}).get('id'),
             "Supply APY": safe_float(state.get('supplyApy')),
             "Utilization": (safe_float(state.get('borrowAssets')) / safe_float(state.get('supplyAssets'))) if safe_float(state.get('supplyAssets')) > 0 else 0,
             "Total Supply (USD)": supply_usd,
@@ -551,7 +548,6 @@ df_filtered = df_filtered[
 st.dataframe(
     df_filtered, 
     column_config={
-        "Link To Market": st.column_config.LinkColumn("Link To Market", display_text="Link"),
         "Price (USD)": st.column_config.NumberColumn(format="dollar"),
         "Total Supply (USD)": st.column_config.NumberColumn(format="dollar"),
         "Total Borrow (USD)": st.column_config.NumberColumn(format="dollar"), 
@@ -560,7 +556,7 @@ st.dataframe(
         "Utilization": st.column_config.NumberColumn(format="percent"), 
     },
     column_order=[
-        "Market ID", "Link To Market", "Chain", "Loan Token", "Collateral", "Price USD", 
+        "Market ID", "Chain", "Loan Token", "Collateral", "Price USD", 
         "Supply APY", "Utilization", "Total Supply (USD)", 
         "Total Borrow (USD)", "Available Liquidity (USD)", "Whitelisted"
     ],
@@ -817,13 +813,12 @@ if not df_selected.empty:
 # Locate the st.data_editor block and replace it with this version
     edited_df = st.data_editor(
         df_selected[[
-            'Market ID', 'Link To Market', 'Chain', 'Loan Token', 'Collateral', 
+            'Market ID', 'Chain', 'Loan Token', 'Collateral', 
             'Supply APY', 'Utilization', 'Total Supply (USD)', 
             'Total Borrow (USD)', 'Available Liquidity (USD)', 
             'Existing Balance (USD)'
         ]],
         column_config={
-            "Link To Market": st.column_config.LinkColumn("Link To Market", display_text="Link"),
             "Supply APY": st.column_config.NumberColumn(format="percent"),
             "Utilization": st.column_config.NumberColumn(format="percent"),
             "Total Supply (USD)": st.column_config.NumberColumn(format="dollar"),
@@ -832,7 +827,7 @@ if not df_selected.empty:
             "Existing Balance (USD)": st.column_config.NumberColumn(format="dollar", min_value=0.0)
         },
         disabled=[
-            'Market ID', 'Link To Market', 'Chain', 'Loan Token', 'Collateral', 
+            'Market ID', 'Chain', 'Loan Token', 'Collateral', 
             'Supply APY', 'Utilization', 'Total Supply (USD)', 
             'Total Borrow (USD)', 'Available Liquidity (USD)'
         ],
@@ -1192,10 +1187,9 @@ if not df_selected.empty:
             new_apy = current_apy_val if abs(net_move) < 0.01 else opt.simulate_apy(m, target_val)
             new_annual_interest += (target_val * new_apy)
 
-        results.append({
+            results.append({
                 "Destination ID": str(m['Market ID'])[:7],
                 "Market": f"{m['Loan Token']}/{m['Collateral']}",
-                "Link To Market": m.get('Link To Market'),
                 "Chain": m['Chain'], 
                 "Action": action,
                 "Weight": target_val / total_optimizable if total_optimizable > 0 else 0,
@@ -1291,10 +1285,7 @@ if not df_selected.empty:
                 "% Liq. Share": "{:.2%}",
                 "Contribution to Portfolio APY": "{:.4%}" 
             }), 
-            column_config={
-                "Link To Market": st.column_config.LinkColumn("Link To Market", display_text="Link"),
-            },
-            column_order=["Destination ID", "Market", "Link To Market", "Chain", "Action", "Weight", 
+            column_order=["Destination ID", "Market", "Chain", "Action", "Weight", 
                           "Initial Utilization", "Final Utilization", 
                           "Current ($)", "Target ($)", "Net Move ($)", "Liquid Move ($)", 
                           "Stuck Funds ($)", "Current APY", "Simulated APY", "Ann. Yield", 
@@ -1334,7 +1325,6 @@ if not df_selected.empty:
             destinations.append({
                 "id": row['Market ID Full'],
                 "name": row['Market'],
-                "link": row['Link To Market'],
                 "chain": row['Chain'],
                 "needed": row['Net Move ($)'],
                 "running_balance": row['Current ($)'] 
@@ -1362,6 +1352,7 @@ if not df_selected.empty:
         src_idx, dst_idx = 0, 0
         ordering_counter = 1
         
+        # 1. Match Withdrawals/Cash to New Deposits
         while src_idx < len(sources) and dst_idx < len(destinations):
             src, dst = sources[src_idx], destinations[dst_idx]
             amount_to_move = min(src['available'], dst['needed'])
@@ -1375,7 +1366,6 @@ if not df_selected.empty:
                     "From": src['name'],
                     "From (Chain)": src['chain'],
                     "To": dst['name'],
-                    "Link To Market": dst['link'],
                     "To (Chain)": dst['chain'],
                     "To (address)": str(dst['id'])[:7],
                     "Amount to move ($)": amount_to_move,
@@ -1422,13 +1412,10 @@ if not df_selected.empty:
             
             st.dataframe(
                 styled_df, 
-                column_config={
-                    "Link To Market": st.column_config.LinkColumn("Link To Market", display_text="Link"),
-                },
                 column_order=[
                     "Ordering", 
                     "From", "From (Chain)", 
-                    "To", "Link To Market", "To (Chain)", 
+                    "To", "To (Chain)", 
                     "To (address)", 
                     "Amount to move ($)", 
                     "Remaining Funds In Source ($)"
