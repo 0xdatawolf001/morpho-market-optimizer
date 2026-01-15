@@ -1201,6 +1201,7 @@ if not df_selected.empty:
             results.append({
                 "Destination ID": str(m['Market ID'])[:7],
                 "Market": f"{m['Loan Token']}/{m['Collateral']}",
+                "Token": m['Loan Token'],
                 "Chain": m['Chain'], 
                 "Action": action,
                 "Weight": target_val / total_optimizable if total_optimizable > 0 else 0,
@@ -1218,7 +1219,7 @@ if not df_selected.empty:
                 "Final Liq.": final_available,
                 "% Liq. Share": liq_share,
                 "Market ID Full": m['Market ID'],
-                "ChainID": m['ChainID'], # Ensure ChainID is passed for the link logic
+                "ChainID": m['ChainID'],
                 "Link To Market": f"https://www.monarchlend.xyz/market/{int(m['ChainID'])}/{m['Market ID']}"
             })
 
@@ -1227,6 +1228,7 @@ if not df_selected.empty:
         if unallocated_cash > 0.01:
             results.append({
                 "Market": "⚠️ Unallocated Cash",
+                "Token": "CASH",
                 "Chain": "Wallet",
                 "Action": "⚪ HOLD",
                 "Weight": unallocated_cash / total_optimizable if total_optimizable > 0 else 0,
@@ -1254,7 +1256,7 @@ if not df_selected.empty:
         
         apy_diff = new_blended_apy - current_blended
         interest_diff = new_annual_interest - current_ann
-        selected_weights = np.array([r['Weight'] for r in results])
+        selected_weights = np.array([r['Weight'] for r in results if 'Weight' in r])
         selected_diversity = 1.0 - np.sum(selected_weights**2)
 
         m1, m2, m3, m4, m5, m6 = st.columns(6) 
@@ -1311,6 +1313,31 @@ if not df_selected.empty:
         )
 
         st.divider()
+
+        # --- QoL: CHAIN & ASSET SUMMARY ---
+        st.subheader("🔗 Chain & Asset Summary")
+        st.caption("Aggregate totals per token to assist with batch bridging and withdrawals.")
+        
+        summary_df = df_res.groupby(['Chain', 'Token']).agg({
+            'Current ($)': 'sum',
+            'Target ($)': 'sum',
+            'Net Move ($)': 'sum'
+        }).reset_index()
+
+        st.dataframe(
+            summary_df.style.format({
+                "Current ($)": "${:,.2f}",
+                "Target ($)": "${:,.2f}",
+                "Net Move ($)": "${:,.2f}"
+            }).applymap(
+                lambda x: 'color: #00E676;' if x > 0.01 else ('color: #F44336;' if x < -0.01 else ''), 
+                subset=['Net Move ($)']
+            ),
+            width='stretch',
+            hide_index=True
+        )
+
+        st.divider()
         st.subheader("📋 Execution Plan", help = 'Gives you steps to rebalance')
 
         # --- Update Execution Plan ---
@@ -1318,7 +1345,7 @@ if not df_selected.empty:
         withdraw_df = df_res[df_res["Liquid Move ($)"] < -0.01]
         for _, row in withdraw_df.iterrows():
             sources.append({
-                "id": row['Market ID Full'], # Added ID
+                "id": row['Market ID Full'],
                 "name": row['Market'],
                 "chain": row['Chain'],
                 "available": abs(row['Liquid Move ($)']),
@@ -1328,7 +1355,7 @@ if not df_selected.empty:
             
         if new_cash > 0.01:
             sources.append({ 
-                "id": "Wallet", # Added ID
+                "id": "Wallet",
                 "name": "New Capital", 
                 "chain": "Wallet",
                 "available": new_cash, 
@@ -1343,7 +1370,7 @@ if not df_selected.empty:
                 "id": row['Market ID Full'],
                 "name": row['Market'],
                 "chain": row['Chain'],
-                "chain_id": row['ChainID'], # Include ChainID in destination objects
+                "chain_id": row.get('ChainID'), 
                 "needed": row['Net Move ($)'],
                 "running_balance": row['Current ($)'] 
             })
@@ -1383,7 +1410,7 @@ if not df_selected.empty:
                     "Ordering": ordering_counter,
                     "From": src['name'],
                     "From (Chain)": src['chain'],
-                    "From (address)": str(src['id'])[:7], # Added
+                    "From (address)": str(src['id'])[:7],
                     "To": dst['name'],
                     "To (Chain)": dst['chain'],
                     "To (address)": str(dst['id'])[:7],
@@ -1407,7 +1434,7 @@ if not df_selected.empty:
                     "Ordering": ordering_counter,
                     "From": src['name'],
                     "From (Chain)": src['chain'],
-                    "From (address)": str(src['id'])[:7], # Added
+                    "From (address)": str(src['id'])[:7],
                     "To": "Wallet (Unallocated)",
                     "To (Chain)": "Wallet",
                     "To (address)": "Wallet",
@@ -1418,10 +1445,9 @@ if not df_selected.empty:
             src_idx += 1
 
         if transfer_steps:
-            st.markdown("#### 2. Market Rebalance Steps")
+            st.markdown("#### Market Rebalance Steps")
             df_actions = pd.DataFrame(transfer_steps)
             
-            # Apply styling to the new "Remaining Funds ($)" column name
             styled_df = df_actions.style.format({
                 "Amount to move ($)": "${:,.2f}",
                 "Remaining Funds In Source ($)": "${:,.2f}"
@@ -1434,7 +1460,7 @@ if not df_selected.empty:
                 styled_df, 
                 column_order=[
                     "Ordering", 
-                    "From", "From (Chain)", "From (address)", # Added address
+                    "From", "From (Chain)", "From (address)",
                     "To", "To (Chain)", "To (address)", 
                     "Amount to move ($)", 
                     "Remaining Funds In Source ($)"
