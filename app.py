@@ -19,6 +19,10 @@ TARGET_UTILIZATION = 0.9
 CURVE_STEEPNESS = 4.0
 SECONDS_PER_YEAR = 31536000
 
+# LI.FI API Configuration
+MAX_RETRIES = 3
+RETRY_BACKOFF = 2 # Seconds
+
 # Chart Performance Constants (NEW)
 MAX_SCATTER_PLOT_POINTS = 5000 # Max points for the Efficiency Frontier plot
 MAX_LINE_PLOT_POINTS_PER_STRATEGY = 1000 # Max points per strategy for the Solver Convergence plot
@@ -126,6 +130,66 @@ def filter_small_moves(allocations, market_data_list, threshold_usd, total_budge
     return cleaned_allocations
 
 # ==========================================
+# 1. MATH HELPERS
+# ==========================================
+
+def to_atomic_units(amount_adjusted: float, decimals: int) -> str:
+    """
+    Safely converts decimal-adjusted amount to atomic units (string integer).
+    Prevents floating point errors by using rounding before casting.
+    """
+    if not amount_adjusted or amount_adjusted <= 0:
+        return "0"
+    return str(int(round(amount_adjusted * (10**decimals))))
+
+def get_lifi_quote(from_chain, to_chain, from_token, to_token, amount_atomic, user_address):
+    """
+    Calls LI.FI API to get a quote.
+    amount_atomic must be the string representation of the integer (wei).
+    Includes retry logic with exponential backoff.
+    """
+    url = "https://li.quest/v1/quote"
+    params = {
+        "fromChain": str(from_chain),
+        "toChain": str(to_chain),
+        "fromToken": from_token,
+        "toToken": to_token,
+        "fromAmount": amount_atomic,
+        "fromAddress": user_address,
+        "slippage": 0.0005, 
+        "order": "CHEAPEST"
+    }
+    
+    for attempt in range(MAX_RETRIES):
+        try:
+            print(f"Executing LI.FI Quote Attempt {attempt + 1} for {amount_atomic} units...")
+            response = requests.get(url, params=params, timeout=10)
+            
+            if response.status_code == 200:
+                data = response.json()
+                gas_usd = sum([float(g.get('amountUSD', 0)) for g in data.get('estimate', {}).get('gasCosts', [])])
+                fee_usd = sum([float(f.get('amountUSD', 0)) for f in data.get('estimate', {}).get('feeCosts', [])])
+                
+                amount_in_usd = float(data.get('estimate', {}).get('fromAmountUSD', 0))
+                amount_out_usd = float(data.get('estimate', {}).get('toAmountUSD', 0))
+                slippage_loss = max(0.0, amount_in_usd - amount_out_usd)
+                
+                return gas_usd + fee_usd + slippage_loss
+            
+            elif response.status_code == 429:
+                print("LI.FI Rate Limit hit. Backing off...")
+                time.sleep(RETRY_BACKOFF * (attempt + 1))
+            else:
+                print(f"LI.FI API Error {response.status_code}: {response.text}")
+                
+        except Exception as e:
+            print(f"LI.FI Request Exception: {e}")
+        
+        time.sleep(RETRY_BACKOFF)
+        
+    return None
+
+# ==========================================
 # 2. DATA FETCHING
 # ==========================================
 
@@ -137,6 +201,7 @@ def get_market_dictionary():
           uniqueKey
           whitelisted
           loanAsset { 
+            address  # <--- ADDED THIS
             symbol 
             decimals 
             priceUsd 
@@ -195,6 +260,7 @@ def get_market_dictionary():
             "Market ID": m['uniqueKey'],
             "Chain": CHAIN_ID_TO_NAME.get(loan.get('chain', {}).get('id'), "Other"),
             "Loan Token": loan.get('symbol'),
+            "Loan Address": loan.get('address'), 
             "Collateral": (m.get('collateralAsset') or {}).get('symbol'),
             "Decimals": loan.get('decimals'),
             "Price USD": price_usd,
@@ -1318,14 +1384,13 @@ if not df_selected.empty:
         # 5. EXECUTION LOGIC & TABLES
         # ==========================================
         
-        # 2. NEW: Operational Split (Rebalance vs Swap vs Bridge)
+        # 2. Operational Split (Rebalance vs Swap vs Bridge)
         st.markdown("#### 📤 Withdrawal Operations Split")
         st.caption("Breakdown of where your withdrawn funds should go.")
         
-        # --- A. Theoretical Split (Existing Logic) ---
-        # How much 'room' is there to deposit on each Chain, and specifically for each Token on that Chain?
-        chain_capacities = {} # {ChainName: TotalDepositRoom}
-        token_capacities = {} # {(ChainName, TokenSymbol): SpecificDepositRoom}
+        # --- A. Theoretical Split ---
+        chain_capacities = {} 
+        token_capacities = {} 
         
         deposits = df_res[df_res['Net Move ($)'] > 0.01]
         for _, row in deposits.iterrows():
@@ -1337,11 +1402,7 @@ if not df_selected.empty:
             
         withdraw_logic = []
         withdrawals = df_res[df_res['Net Move ($)'] < -0.01].copy()
-        
-        # Sort by Chain then Token for cleaner display
         withdrawals = withdrawals.sort_values(['Chain', 'Token'])
-        
-        # Aggregating by Source (Chain, Token)
         grouped_withdrawals = withdrawals.groupby(['Chain', 'Token'])['Net Move ($)'].sum().reset_index()
         
         for _, row in grouped_withdrawals.iterrows():
@@ -1387,16 +1448,9 @@ if not df_selected.empty:
                     "1. Keep In Chain And Same Asset (Rebalance)": "${:,.2f}",
                     "2. Swap Asset But In Same Chain (Internal)": "${:,.2f}",
                     "3. Bridge Out": "${:,.2f}"
-                }).applymap(
-                    lambda x: 'background-color: #1b5e20; color: white' if x > 0.01 else '', 
-                    subset=["1. Keep In Chain And Same Asset (Rebalance)"]
-                ).applymap(
-                    lambda x: 'background-color: #01579b; color: white' if x > 0.01 else '', 
-                    subset=["2. Swap Asset But In Same Chain (Internal)"]
-                ).applymap(
-                    lambda x: 'background-color: #b71c1c; color: white' if x > 0.01 else '', 
-                    subset=["3. Bridge Out"]
-                ),
+                }).applymap(lambda x: 'background-color: #1b5e20; color: white' if x > 0.01 else '', subset=["1. Keep In Chain And Same Asset (Rebalance)"])
+                  .applymap(lambda x: 'background-color: #01579b; color: white' if x > 0.01 else '', subset=["2. Swap Asset But In Same Chain (Internal)"])
+                  .applymap(lambda x: 'background-color: #b71c1c; color: white' if x > 0.01 else '', subset=["3. Bridge Out"]),
                 width='stretch',
                 hide_index=True
             )
@@ -1405,6 +1459,7 @@ if not df_selected.empty:
 
         # --- B. Calculate Actual Transfers (Greedy Match) ---
         sources = []
+        # Enrich source data with necessary metadata for LI.FI
         withdraw_df = df_res[df_res["Liquid Move ($)"] < -0.01]
         for _, row in withdraw_df.iterrows():
             sources.append({
@@ -1414,7 +1469,12 @@ if not df_selected.empty:
                 "token": row['Token'],
                 "available": abs(row['Liquid Move ($)']),
                 "running_balance": row['Current ($)'],
-                "type": "Market"
+                "type": "Market",
+                # Metadata for LI.FI
+                "chain_id": row.get('ChainID'),
+                "token_address": row.get('Loan Address', None) or st.session_state.market_dict[st.session_state.market_dict['Market ID'] == row['Market ID Full']].iloc[0]['Loan Address'],
+                "decimals": st.session_state.market_dict[st.session_state.market_dict['Market ID'] == row['Market ID Full']].iloc[0]['Decimals'],
+                "price": row.get('Price USD', 1.0)
             })
             
         if new_cash > 0.01:
@@ -1425,7 +1485,8 @@ if not df_selected.empty:
                 "token": "CASH",
                 "available": new_cash, 
                 "running_balance": new_cash, 
-                "type": "Wallet" 
+                "type": "Wallet",
+                "chain_id": None, "token_address": None, "decimals": 18, "price": 1.0
             })
             
         destinations = []
@@ -1436,9 +1497,12 @@ if not df_selected.empty:
                 "name": row['Market'],
                 "chain": row['Chain'],
                 "token": row['Token'],
-                "chain_id": row.get('ChainID'), 
                 "needed": row['Net Move ($)'],
-                "running_balance": row['Current ($)'] 
+                "running_balance": row['Current ($)'],
+                # Metadata for LI.FI
+                "chain_id": row.get('ChainID'),
+                "token_address": row.get('Loan Address', None) or st.session_state.market_dict[st.session_state.market_dict['Market ID'] == row['Market ID Full']].iloc[0]['Loan Address'],
+                "apy": row.get('Simulated APY', 0.0)
             })
 
         transfer_steps = []
@@ -1462,7 +1526,6 @@ if not df_selected.empty:
                     op_type = "3. Bridge"
                     op_code = 3
                 else:
-                    # Same Chain
                     if src['token'] == dst['token']:
                         op_type = "1. Rebalance"
                         op_code = 1
@@ -1475,15 +1538,21 @@ if not df_selected.empty:
                     "From": src['name'],
                     "From (Chain)": src['chain'],
                     "From (Token)": src['token'],
-                    "From (address)": str(src['id'])[:7],
                     "To": dst['name'],
                     "To (Chain)": dst['chain'],
                     "To (Token)": dst['token'],
-                    "To (address)": str(dst['id'])[:7],
                     "Amount to move ($)": amount_to_move,
                     "Remaining Funds In Source ($)": src['running_balance'],
                     "Operation Type": op_type,
-                    "OpCode": op_code
+                    "OpCode": op_code,
+                    # Hidden Metadata for Analysis
+                    "src_chain_id": src.get('chain_id'),
+                    "dst_chain_id": dst.get('chain_id'),
+                    "src_token": src.get('token_address'),
+                    "dst_token": dst.get('token_address'),
+                    "decimals": src.get('decimals', 18),
+                    "price": src.get('price', 1.0),
+                    "dst_apy": dst.get('apy', 0.0)
                 })
                 ordering_counter += 1
             
@@ -1503,11 +1572,9 @@ if not df_selected.empty:
                     "From": src['name'],
                     "From (Chain)": src['chain'],
                     "From (Token)": src['token'],
-                    "From (address)": str(src['id'])[:7],
                     "To": "Wallet (Unallocated)",
                     "To (Chain)": "Wallet",
                     "To (Token)": "CASH",
-                    "To (address)": "Wallet",
                     "Amount to move ($)": src['available'],
                     "Remaining Funds In Source ($)": src['running_balance'],
                     "Operation Type": "Cash Out",
@@ -1516,86 +1583,151 @@ if not df_selected.empty:
                 ordering_counter += 1
             src_idx += 1
 
-        # --- C. New Table: Source Asset -> Destination Asset Aggregation ---
-        if transfer_steps:
-            st.divider()
-            st.markdown("#### 🔗 Detailed Asset Flow")
-            st.caption("Aggregated view of funds moving from Source (Chain/Token) to Destination (Chain/Token).")
-            
-            df_steps = pd.DataFrame(transfer_steps)
-            
-            # Group by Source/Dest Assets
-            flow_agg = df_steps[df_steps['OpCode'] > 0].groupby(
-                ['From (Chain)', 'From (Token)', 'To (Chain)', 'To (Token)', 'Operation Type']
-            )['Amount to move ($)'].sum().reset_index()
-            
-            if not flow_agg.empty:
-                st.dataframe(
-                    flow_agg.style.format({
-                        "Amount to move ($)": "${:,.2f}"
-                    }),
-                    column_order=['From (Chain)', 'From (Token)', 'To (Chain)', 'To (Token)', 'Amount to move ($)', 'Operation Type'],
-                    width='stretch',
-                    hide_index=True
-                )
-            else:
-                st.info("No complex moves (Rebalance/Swap/Bridge) detected. Only Deposits or Withdrawals.")
-
         st.divider()
-        st.subheader("📋 Execution Plan", help = 'Gives you steps to rebalance')
+        st.subheader("📋 Execution Plan")
 
-        # Logic for Stuck Warning in Plan
+        # Stuck Warning
         stuck_df = df_res[df_res["Stuck Funds ($)"] > 0.01].copy()
         if not stuck_df.empty:
-            st.warning(f"⚠️ **Execution Limited by Liquidity:** ${total_stuck_usd:,.2f} of your intended withdrawals are blocked. Markets below have insufficient exit liquidity:")
-            st.markdown("#### 1. Blocked Withdrawals (Liquidity Limited)")
-            st.dataframe(
-                stuck_df[["Market", "Chain", "Current ($)", "Target ($)", "Initial Liq.", "Stuck Funds ($)"]]
-                .sort_values("Stuck Funds ($)", ascending=False)
-                .style.format({
-                    "Current ($)": "${:,.2f}",
-                    "Target ($)": "${:,.2f}",
-                    "Initial Liq.": "${:,.2f}",
-                    "Stuck Funds ($)": "${:,.2f}"
-                }),
-                width='stretch',
-                hide_index=True
-            )
+            st.warning(f"⚠️ **Execution Limited by Liquidity:** ${total_stuck_usd:,.2f} blocked.")
+            st.dataframe(stuck_df[["Market", "Chain", "Stuck Funds ($)"]].style.format({"Stuck Funds ($)": "${:,.2f}"}), width='stretch', hide_index=True)
 
         if transfer_steps:
             st.markdown("#### Market Rebalance Steps")
             df_actions = pd.DataFrame(transfer_steps)
             
-            # Add color highlights for Operation Type
             def highlight_op(val):
                 if "1." in val: return 'color: #1b5e20; font-weight: bold;' # Green
                 if "2." in val: return 'color: #01579b; font-weight: bold;' # Blue
                 if "3." in val: return 'color: #b71c1c; font-weight: bold;' # Red
                 return ''
 
-            styled_df = df_actions.style.format({
-                "Amount to move ($)": "${:,.2f}",
-                "Remaining Funds In Source ($)": "${:,.2f}"
-            }).applymap(
-                lambda x: 'color: #ff4b4b;' if (isinstance(x, (int, float)) and x <= 0.01) else '', 
-                subset=['Remaining Funds In Source ($)']
-            ).applymap(
-                highlight_op,
-                subset=['Operation Type']
-            )
-            
             st.dataframe(
-                styled_df, 
-                column_order=[
-                    "Ordering", 
-                    "Operation Type",
-                    "From", "From (Chain)", "From (address)",
-                    "To", "To (Chain)", "To (address)", 
-                    "Amount to move ($)", 
-                    "Remaining Funds In Source ($)"
-                ],
+                df_actions.style.format({
+                    "Amount to move ($)": "${:,.2f}",
+                    "Remaining Funds In Source ($)": "${:,.2f}"
+                }).applymap(highlight_op, subset=['Operation Type']), 
+                column_order=["Ordering", "Operation Type", "From", "From (Chain)", "To", "To (Chain)", "Amount to move ($)", "Remaining Funds In Source ($)"],
                 width='stretch', 
                 hide_index=True
             )
+            
+# --- LI.FI ANALYSIS SECTION ---
+            st.markdown("---")
+            st.markdown("### 🕵️‍♀️ Opportunity Cost Analysis (Batched)")
+            st.caption("Aggregates moves by route. Evaluates if yield gains cover total bridge/swap costs.")
+            
+            # Filter for Swaps/Bridges only (OpCode 2 or 3)
+            complex_moves = [x for x in transfer_steps if x.get('OpCode') in [2, 3]]
+            
+            if complex_moves:
+                if st.button("Analyze Gas, Slippage & ROI via LI.FI", type="primary"):
+                    
+                    # 1. Batching Logic: Group by Route
+                    batches = {}
+                    for move in complex_moves:
+                        # Define unique route key
+                        key = (move['src_chain_id'], move['dst_chain_id'], move['src_token'], move['dst_token'])
+                        
+                        if key not in batches:
+                            batches[key] = {
+                                "src_chain_name": move['From (Chain)'],
+                                "dst_chain_name": move['To (Chain)'],
+                                "src_token_symbol": move['From (Token)'],
+                                "dst_token_symbol": move['To (Token)'],
+                                "total_usd": 0.0,
+                                "total_token_amount": 0.0,
+                                "weighted_yield_sum": 0.0,
+                                "decimals": move['decimals'],
+                                "price": move['price']
+                            }
+                        
+                        batches[key]["total_usd"] += move['Amount to move ($)']
+                        # Decimal adjusted token amount
+                        token_amt = move['Amount to move ($)'] / move['price'] if move['price'] > 0 else 0
+                        batches[key]["total_token_amount"] += token_amt
+                        # Yield contribution for weighted APY
+                        batches[key]["weighted_yield_sum"] += (move['Amount to move ($)'] * move['dst_apy'])
+
+                    analysis_results = []
+                    batch_list = list(batches.values())
+                    prog_bar = st.progress(0, text="Requesting batched quotes from LI.FI...")
+                    dummy_wallet = user_wallet if (user_wallet and len(user_wallet) > 10) else "0x0000000000000000000000000000000000000000"
+                    
+                    for i, batch in enumerate(batch_list):
+                        # 2. Convert to Atomic Units for LI.FI
+                        atomic_amt = to_atomic_units(batch['total_token_amount'], batch['decimals'])
+                        
+                        # Find the key keys for the API call
+                        route_key = [k for k, v in batches.items() if v == batch][0]
+                        
+                        # 3. Call API
+                        total_cost_usd = get_lifi_quote(
+                            route_key[0], # src_chain_id
+                            route_key[1], # dst_chain_id
+                            route_key[2], # src_token (address)
+                            route_key[3], # dst_token (address)
+                            atomic_amt,   # ATOMIC UNITS STRING
+                            dummy_wallet
+                        )
+                        
+                        # 4. ROI Logic using Batched Totals
+                        batch_total_usd = batch['total_usd']
+                        batch_weighted_apy = batch['weighted_yield_sum'] / batch_total_usd if batch_total_usd > 0 else 0
+                        
+                        hourly_yield_usd = (batch_total_usd * batch_weighted_apy) / 8760
+                        
+                        rec_time = "N/A"
+                        cost_display = "Quote Failed"
+                        signal = "⚪ Unknown"
+
+                        if total_cost_usd is not None:
+                            cost_display = f"${total_cost_usd:.2f}"
+                            
+                            if hourly_yield_usd > 0:
+                                hours_to_recover = total_cost_usd / hourly_yield_usd
+                                
+                                if hours_to_recover < 24:
+                                    rec_time = f"{hours_to_recover:.1f} hrs"
+                                    signal = "🟢 Highly Worth It"
+                                elif hours_to_recover < 168: # 1 week
+                                    rec_time = f"{hours_to_recover/24:.1f} days"
+                                    signal = "🟡 Worth It"
+                                else:
+                                    rec_time = f"{hours_to_recover/24:.0f} days"
+                                    signal = "🔴 Poor ROI"
+                            else:
+                                rec_time = "Never"
+                                signal = "🔴 Not Profitable"
+                            
+                        # 5. Generate Jumper Link (Uses Decimal Adjusted Figure)
+                        # Format: token_amount is human readable float
+                        link = f"https://jumper.exchange/?fromChain={route_key[0]}&fromToken={route_key[2]}&toChain={route_key[1]}&toToken={route_key[3]}&fromAmount={batch['total_token_amount']}"
+                        
+                        analysis_results.append({
+                            "Signal": signal,
+                            "Route": f"{batch['src_token_symbol']} ({batch['src_chain_name']}) ➡️ {batch['dst_token_symbol']} ({batch['dst_chain_name']})",
+                            "Total Amount": batch_total_usd,
+                            "Est. Cost": cost_display,
+                            "Break-even": rec_time,
+                            "Jumper Link": link
+                        })
+                        prog_bar.progress((i + 1) / len(batch_list))
+                    
+                    prog_bar.empty()
+                    
+                    if analysis_results:
+                        st.dataframe(
+                            pd.DataFrame(analysis_results),
+                            column_config={
+                                "Total Amount": st.column_config.NumberColumn(format="$%.2f"),
+                                "Jumper Link": st.column_config.LinkColumn("Execute Batch", display_text="Open Jumper")
+                            },
+                            hide_index=True,
+                            use_container_width=True
+                        )
+            else:
+                st.info("No cross-chain or swap moves detected in this plan. Costs are negligible.")
+            
         else:
             st.success("✅ Portfolio is aligned with this strategy.")
