@@ -545,6 +545,11 @@ df_filtered = df_filtered[
     (df_filtered['Available Liquidity (USD)'] >= m_avail_usd)
 ]
 
+# Add the URL column
+df_filtered['Link To Market'] = df_filtered.apply(
+    lambda x: f"https://www.monarchlend.xyz/market/{int(x['ChainID'])}/{x['Market ID']}", axis=1
+)
+
 st.dataframe(
     df_filtered, 
     column_config={
@@ -554,11 +559,12 @@ st.dataframe(
         "Available Liquidity (USD)": st.column_config.NumberColumn(format="dollar"),
         "Supply APY": st.column_config.NumberColumn(format="percent"),  
         "Utilization": st.column_config.NumberColumn(format="percent"), 
+        "Link To Market": st.column_config.LinkColumn("Link To Market", display_text="Link")
     },
     column_order=[
         "Market ID", "Chain", "Loan Token", "Collateral", "Price USD", 
         "Supply APY", "Utilization", "Total Supply (USD)", 
-        "Total Borrow (USD)", "Available Liquidity (USD)", "Whitelisted"
+        "Total Borrow (USD)", "Available Liquidity (USD)", "Whitelisted", "Link To Market"
     ],
     width="stretch", 
     hide_index=True
@@ -788,11 +794,15 @@ with col_param:
     )
 
 if not df_selected.empty:
-    # Yellow box st.info removed per request
 
     # 1. Ensure current state is mapped to the dataframe
     df_selected['Existing Balance (USD)'] = df_selected['Market ID'].apply(
         lambda x: st.session_state.balance_cache.get(x, 0.0)
+    )
+
+    # Add the URL column
+    df_selected['Link To Market'] = df_selected.apply(
+        lambda x: f"https://www.monarchlend.xyz/market/{int(x['ChainID'])}/{x['Market ID']}", axis=1
     )
 
     df_selected = df_selected.sort_values(by='Existing Balance (USD)', ascending=False)
@@ -816,7 +826,7 @@ if not df_selected.empty:
             'Market ID', 'Chain', 'Loan Token', 'Collateral', 
             'Supply APY', 'Utilization', 'Total Supply (USD)', 
             'Total Borrow (USD)', 'Available Liquidity (USD)', 
-            'Existing Balance (USD)'
+            'Existing Balance (USD)', 'Link To Market'
         ]],
         column_config={
             "Supply APY": st.column_config.NumberColumn(format="percent"),
@@ -824,12 +834,13 @@ if not df_selected.empty:
             "Total Supply (USD)": st.column_config.NumberColumn(format="dollar"),
             "Total Borrow (USD)": st.column_config.NumberColumn(format="dollar"),
             "Available Liquidity (USD)": st.column_config.NumberColumn(format="dollar"),
-            "Existing Balance (USD)": st.column_config.NumberColumn(format="dollar", min_value=0.0)
+            "Existing Balance (USD)": st.column_config.NumberColumn(format="dollar", min_value=0.0),
+            "Link To Market": st.column_config.LinkColumn("Link To Market", display_text="Link")
         },
         disabled=[
             'Market ID', 'Chain', 'Loan Token', 'Collateral', 
             'Supply APY', 'Utilization', 'Total Supply (USD)', 
-            'Total Borrow (USD)', 'Available Liquidity (USD)'
+            'Total Borrow (USD)', 'Available Liquidity (USD)', 'Link To Market'
         ],
         width='stretch', 
         hide_index=True, 
@@ -1193,8 +1204,8 @@ if not df_selected.empty:
                 "Chain": m['Chain'], 
                 "Action": action,
                 "Weight": target_val / total_optimizable if total_optimizable > 0 else 0,
-                "Initial Utilization": initial_util,    # NEW COLUMN
-                "Final Utilization": final_util,        # NEW COLUMN
+                "Initial Utilization": initial_util,
+                "Final Utilization": final_util,
                 "Current ($)": user_current,
                 "Target ($)": target_val,
                 "Net Move ($)": net_move,
@@ -1206,7 +1217,9 @@ if not df_selected.empty:
                 "Initial Liq.": current_avail,
                 "Final Liq.": final_available,
                 "% Liq. Share": liq_share,
-                "Market ID Full": m['Market ID']
+                "Market ID Full": m['Market ID'],
+                "ChainID": m['ChainID'], # Ensure ChainID is passed for the link logic
+                "Link To Market": f"https://www.monarchlend.xyz/market/{int(m['ChainID'])}/{m['Market ID']}"
             })
 
         # --- Check for Unallocated Capital ---
@@ -1285,11 +1298,14 @@ if not df_selected.empty:
                 "% Liq. Share": "{:.2%}",
                 "Contribution to Portfolio APY": "{:.4%}" 
             }), 
+            column_config={
+                "Link To Market": st.column_config.LinkColumn("Link To Market", display_text="Link")
+            },
             column_order=["Destination ID", "Market", "Chain", "Action", "Weight", 
                           "Initial Utilization", "Final Utilization", 
                           "Current ($)", "Target ($)", "Net Move ($)", "Liquid Move ($)", 
                           "Stuck Funds ($)", "Current APY", "Simulated APY", "Ann. Yield", 
-                          "Initial Liq.", "Final Liq.", "% Liq. Share", "Contribution to Portfolio APY"],
+                          "Initial Liq.", "Final Liq.", "% Liq. Share", "Contribution to Portfolio APY", "Link To Market"],
             width='stretch', 
             hide_index=True
         )
@@ -1326,6 +1342,7 @@ if not df_selected.empty:
                 "id": row['Market ID Full'],
                 "name": row['Market'],
                 "chain": row['Chain'],
+                "chain_id": row['ChainID'], # Include ChainID in destination objects
                 "needed": row['Net Move ($)'],
                 "running_balance": row['Current ($)'] 
             })
