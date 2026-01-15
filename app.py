@@ -142,52 +142,99 @@ def to_atomic_units(amount_adjusted: float, decimals: int) -> str:
         return "0"
     return str(int(round(amount_adjusted * (10**decimals))))
 
-def get_lifi_quote(from_chain, to_chain, from_token, to_token, amount_atomic, user_address):
+def get_lifi_quote(from_chain, to_chain, from_token, to_token, amount_atomic, user_address, user_slippage_decimal):
     """
-    Calls LI.FI API to get a quote.
-    amount_atomic must be the string representation of the integer (wei).
-    Includes retry logic with exponential backoff.
-    """
-    url = "https://li.quest/v1/quote"
-    params = {
-        "fromChain": str(from_chain),
-        "toChain": str(to_chain),
-        "fromToken": from_token,
-        "toToken": to_token,
-        "fromAmount": amount_atomic,
-        "fromAddress": user_address,
-        "slippage": 0.0005, 
-        "order": "CHEAPEST"
-    }
+    Calls LI.FI API with smart slippage escalation.
+    1. Tries user_slippage_decimal first.
+    2. If fails, tries standard tiers: 0.05%, 0.1%, 0.5%, 1.0%, 5.0% (skipping those stricter than user input).
     
-    for attempt in range(MAX_RETRIES):
-        try:
-            print(f"Executing LI.FI Quote Attempt {attempt + 1} for {amount_atomic} units...")
-            response = requests.get(url, params=params, timeout=10)
+    Returns dict with costs, amounts, and the actual slippage used.
+    """
+    base_url = "https://li.quest/v1/quote"
+    
+    # Define the ladder of slippage tolerances to attempt
+    # We always start with the user's preference
+    ladder = [user_slippage_decimal]
+    standard_tiers = [0.0005, 0.001, 0.005, 0.01, 0.05]
+    
+    # Add standard tiers to ladder if they are looser than user input
+    for tier in standard_tiers:
+        if tier > user_slippage_decimal:
+            ladder.append(tier)
             
-            if response.status_code == 200:
-                data = response.json()
-                gas_usd = sum([float(g.get('amountUSD', 0)) for g in data.get('estimate', {}).get('gasCosts', [])])
-                fee_usd = sum([float(f.get('amountUSD', 0)) for f in data.get('estimate', {}).get('feeCosts', [])])
-                
-                amount_in_usd = float(data.get('estimate', {}).get('fromAmountUSD', 0))
-                amount_out_usd = float(data.get('estimate', {}).get('toAmountUSD', 0))
-                slippage_loss = max(0.0, amount_in_usd - amount_out_usd)
-                
-                return gas_usd + fee_usd + slippage_loss
-            
-            elif response.status_code == 429:
-                print("LI.FI Rate Limit hit. Backing off...")
-                time.sleep(RETRY_BACKOFF * (attempt + 1))
-            else:
-                print(f"LI.FI API Error {response.status_code}: {response.text}")
-                
-        except Exception as e:
-            print(f"LI.FI Request Exception: {e}")
+    # Remove duplicates and keep order
+    ladder = sorted(list(set(ladder)))
+    # Ensure user input is first index if it was sorted out
+    if ladder[0] != user_slippage_decimal:
+        ladder.remove(user_slippage_decimal)
+        ladder.insert(0, user_slippage_decimal)
+
+    last_error = None
+
+    for slippage_try in ladder:
+        params = {
+            "fromChain": str(from_chain),
+            "toChain": str(to_chain),
+            "fromToken": from_token,
+            "toToken": to_token,
+            "fromAmount": amount_atomic,
+            "fromAddress": user_address,
+            "slippage": slippage_try, 
+            "order": "CHEAPEST"
+        }
         
-        time.sleep(RETRY_BACKOFF)
+        # Inner Retry Loop for Network/Rate Limits
+        for attempt in range(MAX_RETRIES):
+            try:
+                # print(f"LI.FI Attempt: Slippage {slippage_try*100:.2f}% | Try {attempt+1}")
+                response = requests.get(base_url, params=params, timeout=10)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    
+                    # 1. Costs
+                    gas_costs = data.get('estimate', {}).get('gasCosts', [])
+                    gas_usd = sum([float(g.get('amountUSD', 0)) for g in gas_costs])
+                    
+                    fee_costs = data.get('estimate', {}).get('feeCosts', [])
+                    fee_usd = sum([float(f.get('amountUSD', 0)) for f in fee_costs])
+                    
+                    # 2. Amounts (Before vs Final Simulated)
+                    amount_in_usd = float(data.get('estimate', {}).get('fromAmountUSD', 0))
+                    amount_out_usd = float(data.get('estimate', {}).get('toAmountUSD', 0))
+                    
+                    # 3. Value Loss (Slippage Cost)
+                    slippage_loss = max(0.0, amount_in_usd - amount_out_usd)
+                    total_cost = gas_usd + fee_usd + slippage_loss
+                    
+                    return {
+                        "success": True,
+                        "total_cost": total_cost,
+                        "gas": gas_usd,
+                        "fees": fee_usd,
+                        "slippage_cost": slippage_loss,
+                        "amount_in": amount_in_usd,
+                        "amount_out": amount_out_usd,
+                        "slippage_used": slippage_try
+                    }
+                
+                elif response.status_code == 429:
+                    time.sleep(RETRY_BACKOFF * (attempt + 1))
+                    continue # Retry same slippage
+                
+                else:
+                    # If 404 or specific route errors, break inner loop to try next slippage tier
+                    last_error = response.text
+                    break 
+                    
+            except Exception as e:
+                print(f"LI.FI Exception: {e}")
+                time.sleep(RETRY_BACKOFF)
         
-    return None
+        # If we are here, the inner loop finished without returning success.
+        # Loop continues to next slippage_try in ladder
+    
+    return {"success": False, "error": last_error}
 
 # ==========================================
 # 2. DATA FETCHING
@@ -1615,14 +1662,23 @@ if not df_selected.empty:
 # --- LI.FI ANALYSIS SECTION ---
             st.markdown("---")
             st.markdown("### 🕵️‍♀️ Opportunity Cost Analysis (Batched)")
-            st.caption("Aggregates moves by route. Evaluates if yield gains cover total bridge/swap costs.")
+            st.caption("Aggregates moves by route. Simulates execution to find actual costs and break-even time.")
             
             # Filter for Swaps/Bridges only (OpCode 2 or 3)
             complex_moves = [x for x in transfer_steps if x.get('OpCode') in [2, 3]]
             
             if complex_moves:
-                if st.button("Analyze Gas, Slippage & ROI via LI.FI", type="primary"):
+                c_an1, c_an2 = st.columns([1, 2])
+                with c_an1:
+                    # User inputs Percentage (e.g. 0.5), we convert to decimal (0.005) later
+                    user_slippage_pct = st.number_input("Target Slippage Tolerance (%)", min_value=0.01, max_value=5.0, value=0.5, step=0.05)
                     
+                with c_an2:
+                    st.write("") # Spacer
+                    st.write("") # Spacer
+                    run_analysis = st.button("Analyze Gas, Slippage & ROI via LI.FI", type="primary")
+
+                if run_analysis:
                     # 1. Batching Logic: Group by Route
                     batches = {}
                     for move in complex_moves:
@@ -1654,6 +1710,9 @@ if not df_selected.empty:
                     prog_bar = st.progress(0, text="Requesting batched quotes from LI.FI...")
                     dummy_wallet = user_wallet if (user_wallet and len(user_wallet) > 10) else "0x0000000000000000000000000000000000000000"
                     
+                    # Portfolio level earnings rate (per hour)
+                    portfolio_hourly_earnings = new_annual_interest / 8760 if new_annual_interest > 0 else 0
+
                     for i, batch in enumerate(batch_list):
                         # 2. Convert to Atomic Units for LI.FI
                         atomic_amt = to_atomic_units(batch['total_token_amount'], batch['decimals'])
@@ -1661,55 +1720,91 @@ if not df_selected.empty:
                         # Find the key keys for the API call
                         route_key = [k for k, v in batches.items() if v == batch][0]
                         
-                        # 3. Call API
-                        total_cost_usd = get_lifi_quote(
+                        # 3. Call API with Smart Slippage
+                        # Input is Percentage (0.5), convert to Decimal (0.005)
+                        quote_res = get_lifi_quote(
                             route_key[0], # src_chain_id
                             route_key[1], # dst_chain_id
                             route_key[2], # src_token (address)
                             route_key[3], # dst_token (address)
                             atomic_amt,   # ATOMIC UNITS STRING
-                            dummy_wallet
+                            dummy_wallet,
+                            user_slippage_decimal=(user_slippage_pct / 100.0)
                         )
                         
                         # 4. ROI Logic using Batched Totals
                         batch_total_usd = batch['total_usd']
                         batch_weighted_apy = batch['weighted_yield_sum'] / batch_total_usd if batch_total_usd > 0 else 0
                         
-                        hourly_yield_usd = (batch_total_usd * batch_weighted_apy) / 8760
+                        # Asset-Chain level earnings
+                        asset_hourly_yield_usd = (batch_total_usd * batch_weighted_apy) / 8760
                         
-                        rec_time = "N/A"
+                        asset_breakeven_str = "N/A"
+                        port_breakeven_str = "N/A"
+                        
                         cost_display = "Quote Failed"
+                        gas_display = fee_display = slip_display = "$0.00"
+                        amt_in_display = f"${batch_total_usd:,.2f}" # Default to theoretical if fail
+                        amt_out_display = "$0.00"
+                        slippage_used_display = "Failed"
+                        
                         signal = "⚪ Unknown"
 
-                        if total_cost_usd is not None:
-                            cost_display = f"${total_cost_usd:.2f}"
+                        if quote_res['success']:
+                            total_cost = quote_res['total_cost']
+                            cost_display = f"${total_cost:.2f}"
                             
-                            if hourly_yield_usd > 0:
-                                hours_to_recover = total_cost_usd / hourly_yield_usd
-                                
+                            gas_display = f"${quote_res['gas']:.2f}"
+                            fee_display = f"${quote_res['fees']:.2f}"
+                            slip_display = f"${quote_res['slippage_cost']:.2f}"
+                            
+                            amt_in_display = f"${quote_res['amount_in']:,.2f}"
+                            amt_out_display = f"${quote_res['amount_out']:,.2f}"
+                            
+                            # Show Slippage Used as Percentage
+                            slippage_used_display = f"{quote_res['slippage_used']*100:.2f}%"
+
+                            # --- A. Asset-Chain Break-even ---
+                            if asset_hourly_yield_usd > 0:
+                                hours_to_recover = total_cost / asset_hourly_yield_usd
                                 if hours_to_recover < 24:
-                                    rec_time = f"{hours_to_recover:.1f} hrs"
-                                    signal = "🟢 Highly Worth It"
-                                elif hours_to_recover < 168: # 1 week
-                                    rec_time = f"{hours_to_recover/24:.1f} days"
-                                    signal = "🟡 Worth It"
+                                    asset_breakeven_str = f"{hours_to_recover:.1f} hrs"
+                                    signal = "🟢 Good"
+                                elif hours_to_recover < 168:
+                                    asset_breakeven_str = f"{hours_to_recover/24:.1f} days"
+                                    signal = "🟡 Okay"
                                 else:
-                                    rec_time = f"{hours_to_recover/24:.0f} days"
-                                    signal = "🔴 Poor ROI"
+                                    asset_breakeven_str = f"{hours_to_recover/24:.0f} days"
+                                    signal = "🔴 Poor"
                             else:
-                                rec_time = "Never"
-                                signal = "🔴 Not Profitable"
+                                asset_breakeven_str = "Never"
+                                signal = "🔴 Bad"
+
+                            # --- B. Portfolio Break-even ---
+                            if portfolio_hourly_earnings > 0:
+                                port_hours = total_cost / portfolio_hourly_earnings
+                                if port_hours < 1:
+                                    port_breakeven_str = "Instant"
+                                elif port_hours < 24:
+                                    port_breakeven_str = f"{port_hours:.1f} hrs"
+                                else:
+                                    port_breakeven_str = f"{port_hours/24:.1f} days"
                             
-                        # 5. Generate Jumper Link (Uses Decimal Adjusted Figure)
-                        # Format: token_amount is human readable float
+                        # 5. Generate Jumper Link
                         link = f"https://jumper.exchange/?fromChain={route_key[0]}&fromToken={route_key[2]}&toChain={route_key[1]}&toToken={route_key[3]}&fromAmount={batch['total_token_amount']}"
                         
                         analysis_results.append({
                             "Signal": signal,
                             "Route": f"{batch['src_token_symbol']} ({batch['src_chain_name']}) ➡️ {batch['dst_token_symbol']} ({batch['dst_chain_name']})",
-                            "Total Amount": batch_total_usd,
-                            "Est. Cost": cost_display,
-                            "Break-even": rec_time,
+                            "Amount In": amt_in_display,
+                            "Simulated Out": amt_out_display,
+                            "Total Cost": cost_display,
+                            "Gas": gas_display,
+                            "Fees": fee_display,
+                            "Slippage ($)": slip_display,
+                            "Slippage Used": slippage_used_display,
+                            "Asset B/E": asset_breakeven_str,
+                            "Portfolio B/E": port_breakeven_str,
                             "Jumper Link": link
                         })
                         prog_bar.progress((i + 1) / len(batch_list))
@@ -1720,8 +1815,12 @@ if not df_selected.empty:
                         st.dataframe(
                             pd.DataFrame(analysis_results),
                             column_config={
-                                "Total Amount": st.column_config.NumberColumn(format="$%.2f"),
-                                "Jumper Link": st.column_config.LinkColumn("Execute Batch", display_text="Open Jumper")
+                                "Amount In": st.column_config.TextColumn(help="USD Value of tokens sent"),
+                                "Simulated Out": st.column_config.TextColumn(help="USD Value of tokens received (after fees/slippage)"),
+                                "Slippage Used": st.column_config.TextColumn(help="The slippage tolerance required to get this quote"),
+                                "Jumper Link": st.column_config.LinkColumn("Execute Batch", display_text="Open Jumper"),
+                                "Asset B/E": st.column_config.TextColumn(help="Time for this specific position's yield to pay off the transfer cost."),
+                                "Portfolio B/E": st.column_config.TextColumn(help="Time for your TOTAL portfolio yield to pay off this specific transfer cost.")
                             },
                             hide_index=True,
                             use_container_width=True
