@@ -1662,7 +1662,7 @@ if not df_selected.empty:
 # --- LI.FI ANALYSIS SECTION ---
             st.markdown("---")
             st.markdown("### 🕵️‍♀️ Opportunity Cost Analysis (Batched)")
-            st.caption("Aggregates moves by route. Simulates execution to find actual costs and break-even time.")
+            st.caption("Aggregates moves by route. Simulates execution to find actual costs and break-even time. Note that this is just an estimate and Jumper may give different values")
             
             # Filter for Swaps/Bridges only (OpCode 2 or 3)
             complex_moves = [x for x in transfer_steps if x.get('OpCode') in [2, 3]]
@@ -1671,12 +1671,15 @@ if not df_selected.empty:
                 c_an1, c_an2 = st.columns([1, 2])
                 with c_an1:
                     # User inputs Percentage (e.g. 0.5), we convert to decimal (0.005) later
-                    user_slippage_pct = st.number_input("Target Slippage Tolerance (%)", min_value=0.0001, max_value=5.0, value=0.05, step=0.01)
+                    user_slippage_pct = st.number_input("Target Slippage Tolerance (%)", min_value=0.0001, max_value=5.0, value=0.01, step=0.01)
                     
                 with c_an2:
                     st.write("") # Spacer
                     st.write("") # Spacer
                     run_analysis = st.button("Analyze Gas, Slippage & ROI via LI.FI", type="primary")
+
+# Locate the 'if run_analysis:' block (Ctrl+F: if run_analysis:) 
+# and replace the entire block with the following:
 
                 if run_analysis:
                     # 1. Batching Logic: Group by Route
@@ -1721,7 +1724,6 @@ if not df_selected.empty:
                         route_key = [k for k, v in batches.items() if v == batch][0]
                         
                         # 3. Call API with Smart Slippage
-                        # Input is Percentage (0.5), convert to Decimal (0.005)
                         quote_res = get_lifi_quote(
                             route_key[0], # src_chain_id
                             route_key[1], # dst_chain_id
@@ -1736,6 +1738,9 @@ if not df_selected.empty:
                         batch_total_usd = batch['total_usd']
                         batch_weighted_apy = batch['weighted_yield_sum'] / batch_total_usd if batch_total_usd > 0 else 0
                         
+                        # New: Portfolio APY Contribution (Multiplied by 100 for formatter)
+                        portfolio_apy_contribution_pct = (batch['weighted_yield_sum'] / total_optimizable * 100) if total_optimizable > 0 else 0.0
+
                         # Asset-Chain level earnings
                         asset_hourly_yield_usd = (batch_total_usd * batch_weighted_apy) / 8760
                         
@@ -1798,6 +1803,7 @@ if not df_selected.empty:
                             "Route": f"{batch['src_token_symbol']} ({batch['src_chain_name']}) ➡️ {batch['dst_token_symbol']} ({batch['dst_chain_name']})",
                             "Amount In": amt_in_display,
                             "Simulated Out": amt_out_display,
+                            "Portfolio APY Contribution": portfolio_apy_contribution_pct,
                             "Total Cost": cost_display,
                             "Gas": gas_display,
                             "Fees": fee_display,
@@ -1817,6 +1823,10 @@ if not df_selected.empty:
                             column_config={
                                 "Amount In": st.column_config.TextColumn(help="USD Value of tokens sent"),
                                 "Simulated Out": st.column_config.TextColumn(help="USD Value of tokens received (after fees/slippage)"),
+                                "Portfolio APY Contribution": st.column_config.NumberColumn(
+                                    help="How much this specific route contributes to your TOTAL portfolio APY (Gross annual yield / Total Budget).",
+                                    format="%.4f%%"
+                                ),
                                 "Slippage Used": st.column_config.TextColumn(help="The slippage tolerance required to get this quote"),
                                 "Jumper Link": st.column_config.LinkColumn("Execute Batch", display_text="Open Jumper"),
                                 "Asset B/E": st.column_config.TextColumn(help="Time for this specific position's yield to pay off the transfer cost."),
