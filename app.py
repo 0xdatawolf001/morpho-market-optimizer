@@ -1644,7 +1644,7 @@ if not df_selected.empty:
             df_actions = pd.DataFrame(transfer_steps)
             
             def highlight_op(val):
-                if "1." in val: return 'color: #1b5e20; font-weight: bold;' # Green
+                if "1." in val: return 'color: #00E676; font-weight: bold;' # Brighter Green
                 if "2." in val: return 'color: #01579b; font-weight: bold;' # Blue
                 if "3." in val: return 'color: #b71c1c; font-weight: bold;' # Red
                 return ''
