@@ -1671,7 +1671,7 @@ if not df_selected.empty:
                 c_an1, c_an2 = st.columns([1, 2])
                 with c_an1:
                     # User inputs Percentage (e.g. 0.5), we convert to decimal (0.005) later
-                    user_slippage_pct = st.number_input("Target Slippage Tolerance (%)", min_value=0.01, max_value=5.0, value=0.5, step=0.05)
+                    user_slippage_pct = st.number_input("Target Slippage Tolerance (%)", min_value=0.001, max_value=5.0, value=0.05, step=0.05)
                     
                 with c_an2:
                     st.write("") # Spacer
