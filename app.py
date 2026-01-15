@@ -1314,28 +1314,97 @@ if not df_selected.empty:
 
         st.divider()
 
-        # --- QoL: CHAIN & ASSET SUMMARY ---
-        st.subheader("🔗 Chain & Asset Summary")
-        st.caption("Aggregate totals per token to assist with batch bridging and withdrawals.")
+# 2. NEW: Operational Split (Rebalance vs Swap vs Bridge)
+        st.markdown("#### 📤 Withdrawal Operations Split")
+        st.caption("Breakdown of where your withdrawn funds should go.")
         
-        summary_df = df_res.groupby(['Chain', 'Token']).agg({
-            'Current ($)': 'sum',
-            'Target ($)': 'sum',
-            'Net Move ($)': 'sum'
-        }).reset_index()
-
-        st.dataframe(
-            summary_df.style.format({
-                "Current ($)": "${:,.2f}",
-                "Target ($)": "${:,.2f}",
-                "Net Move ($)": "${:,.2f}"
-            }).applymap(
-                lambda x: 'color: #00E676;' if x > 0.01 else ('color: #F44336;' if x < -0.01 else ''), 
-                subset=['Net Move ($)']
-            ),
-            width='stretch',
-            hide_index=True
-        )
+        # A. Pre-calculate Destination Capacities
+        # How much 'room' is there to deposit on each Chain, and specifically for each Token on that Chain?
+        chain_capacities = {} # {ChainName: TotalDepositRoom}
+        token_capacities = {} # {(ChainName, TokenSymbol): SpecificDepositRoom}
+        
+        deposits = df_res[df_res['Net Move ($)'] > 0.01]
+        for _, row in deposits.iterrows():
+            c = row['Chain']
+            t = row['Token']
+            amt = row['Net Move ($)']
+            
+            chain_capacities[c] = chain_capacities.get(c, 0.0) + amt
+            token_capacities[(c, t)] = token_capacities.get((c, t), 0.0) + amt
+            
+        # B. Process Withdrawals
+        withdraw_logic = []
+        withdrawals = df_res[df_res['Net Move ($)'] < -0.01].copy()
+        
+        # Sort by Chain then Token for cleaner display
+        withdrawals = withdrawals.sort_values(['Chain', 'Token'])
+        
+        # Aggregating by Source (Chain, Token)
+        grouped_withdrawals = withdrawals.groupby(['Chain', 'Token'])['Net Move ($)'].sum().reset_index()
+        
+        for _, row in grouped_withdrawals.iterrows():
+            src_chain = row['Chain']
+            src_token = row['Token']
+            total_withdrawal = abs(row['Net Move ($)'])
+            remaining_val = total_withdrawal
+            
+            # 1. Match: Rebalance (Same Chain, Same Token)
+            specific_cap = token_capacities.get((src_chain, src_token), 0.0)
+            matched_rebalance = min(remaining_val, specific_cap)
+            
+            if matched_rebalance > 0:
+                token_capacities[(src_chain, src_token)] -= matched_rebalance
+                chain_capacities[src_chain] -= matched_rebalance
+                remaining_val -= matched_rebalance
+            
+            # 2. Match: Swap (Same Chain, Different Token)
+            general_cap = chain_capacities.get(src_chain, 0.0)
+            matched_swap = min(remaining_val, general_cap)
+            
+            if matched_swap > 0:
+                chain_capacities[src_chain] -= matched_swap
+                remaining_val -= matched_swap
+                
+            # 3. Match: Bridge (Exit Chain)
+            matched_bridge = remaining_val
+            
+            withdraw_logic.append({
+                "Source Chain": src_chain,
+                "Asset": src_token,
+                "Total Withdrawing": total_withdrawal,
+                "1. Keep In Chain And Same Asset (Rebalance)": matched_rebalance,
+                "2. Swap Asset But In Same Chain (Internal)": matched_swap,
+                "3. Bridge Out": matched_bridge
+            })
+            
+        if withdraw_logic:
+            df_ops = pd.DataFrame(withdraw_logic)
+            
+            # Format and Display (Matplotlib-free version)
+            st.dataframe(
+                df_ops.style.format({
+                    "Total Withdrawing": "${:,.2f}",
+                    "1. Keep In Chain And Same Asset (Rebalance)": "${:,.2f}",
+                    "2. Swap Asset But In Same Chain (Internal)": "${:,.2f}",
+                    "3. Bridge Out": "${:,.2f}"
+                }).applymap(
+                    # Green background for Rebalance
+                    lambda x: 'background-color: #1b5e20; color: white' if x > 0.01 else '', 
+                    subset=["1. Keep In Chain And Same Asset (Rebalance)"]
+                ).applymap(
+                    # Blue background for Swap
+                    lambda x: 'background-color: #01579b; color: white' if x > 0.01 else '', 
+                    subset=["2. Swap Asset But In Same Chain (Internal)"]
+                ).applymap(
+                    # Red background for Bridge
+                    lambda x: 'background-color: #b71c1c; color: white' if x > 0.01 else '', 
+                    subset=["3. Bridge Out"]
+                ),
+                width='stretch',
+                hide_index=True
+            )
+        else:
+            st.info("No withdrawals required for this strategy.")
 
         st.divider()
         st.subheader("📋 Execution Plan", help = 'Gives you steps to rebalance')
