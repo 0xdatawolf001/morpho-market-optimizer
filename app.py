@@ -1314,11 +1314,15 @@ if not df_selected.empty:
 
         st.divider()
 
-# 2. NEW: Operational Split (Rebalance vs Swap vs Bridge)
+# ==========================================
+        # 5. EXECUTION LOGIC & TABLES
+        # ==========================================
+        
+        # 2. NEW: Operational Split (Rebalance vs Swap vs Bridge)
         st.markdown("#### 📤 Withdrawal Operations Split")
         st.caption("Breakdown of where your withdrawn funds should go.")
         
-        # A. Pre-calculate Destination Capacities
+        # --- A. Theoretical Split (Existing Logic) ---
         # How much 'room' is there to deposit on each Chain, and specifically for each Token on that Chain?
         chain_capacities = {} # {ChainName: TotalDepositRoom}
         token_capacities = {} # {(ChainName, TokenSymbol): SpecificDepositRoom}
@@ -1328,11 +1332,9 @@ if not df_selected.empty:
             c = row['Chain']
             t = row['Token']
             amt = row['Net Move ($)']
-            
             chain_capacities[c] = chain_capacities.get(c, 0.0) + amt
             token_capacities[(c, t)] = token_capacities.get((c, t), 0.0) + amt
             
-        # B. Process Withdrawals
         withdraw_logic = []
         withdrawals = df_res[df_res['Net Move ($)'] < -0.01].copy()
         
@@ -1379,8 +1381,6 @@ if not df_selected.empty:
             
         if withdraw_logic:
             df_ops = pd.DataFrame(withdraw_logic)
-            
-            # Format and Display (Matplotlib-free version)
             st.dataframe(
                 df_ops.style.format({
                     "Total Withdrawing": "${:,.2f}",
@@ -1388,15 +1388,12 @@ if not df_selected.empty:
                     "2. Swap Asset But In Same Chain (Internal)": "${:,.2f}",
                     "3. Bridge Out": "${:,.2f}"
                 }).applymap(
-                    # Green background for Rebalance
                     lambda x: 'background-color: #1b5e20; color: white' if x > 0.01 else '', 
                     subset=["1. Keep In Chain And Same Asset (Rebalance)"]
                 ).applymap(
-                    # Blue background for Swap
                     lambda x: 'background-color: #01579b; color: white' if x > 0.01 else '', 
                     subset=["2. Swap Asset But In Same Chain (Internal)"]
                 ).applymap(
-                    # Red background for Bridge
                     lambda x: 'background-color: #b71c1c; color: white' if x > 0.01 else '', 
                     subset=["3. Bridge Out"]
                 ),
@@ -1406,10 +1403,7 @@ if not df_selected.empty:
         else:
             st.info("No withdrawals required for this strategy.")
 
-        st.divider()
-        st.subheader("📋 Execution Plan", help = 'Gives you steps to rebalance')
-
-        # --- Update Execution Plan ---
+        # --- B. Calculate Actual Transfers (Greedy Match) ---
         sources = []
         withdraw_df = df_res[df_res["Liquid Move ($)"] < -0.01]
         for _, row in withdraw_df.iterrows():
@@ -1417,6 +1411,7 @@ if not df_selected.empty:
                 "id": row['Market ID Full'],
                 "name": row['Market'],
                 "chain": row['Chain'],
+                "token": row['Token'],
                 "available": abs(row['Liquid Move ($)']),
                 "running_balance": row['Current ($)'],
                 "type": "Market"
@@ -1427,6 +1422,7 @@ if not df_selected.empty:
                 "id": "Wallet",
                 "name": "New Capital", 
                 "chain": "Wallet",
+                "token": "CASH",
                 "available": new_cash, 
                 "running_balance": new_cash, 
                 "type": "Wallet" 
@@ -1439,10 +1435,114 @@ if not df_selected.empty:
                 "id": row['Market ID Full'],
                 "name": row['Market'],
                 "chain": row['Chain'],
+                "token": row['Token'],
                 "chain_id": row.get('ChainID'), 
                 "needed": row['Net Move ($)'],
                 "running_balance": row['Current ($)'] 
             })
+
+        transfer_steps = []
+        src_idx, dst_idx = 0, 0
+        ordering_counter = 1
+        
+        # 1. Match Sources to Destinations
+        while src_idx < len(sources) and dst_idx < len(destinations):
+            src, dst = sources[src_idx], destinations[dst_idx]
+            amount_to_move = min(src['available'], dst['needed'])
+            
+            if amount_to_move > 0.01: 
+                dst['running_balance'] += amount_to_move
+                src['running_balance'] -= amount_to_move
+                
+                # Determine Operation Type
+                if src['type'] == "Wallet":
+                    op_type = "New Deposit"
+                    op_code = 0
+                elif src['chain'] != dst['chain']:
+                    op_type = "3. Bridge"
+                    op_code = 3
+                else:
+                    # Same Chain
+                    if src['token'] == dst['token']:
+                        op_type = "1. Rebalance"
+                        op_code = 1
+                    else:
+                        op_type = "2. Swap"
+                        op_code = 2
+
+                transfer_steps.append({
+                    "Ordering": ordering_counter,
+                    "From": src['name'],
+                    "From (Chain)": src['chain'],
+                    "From (Token)": src['token'],
+                    "From (address)": str(src['id'])[:7],
+                    "To": dst['name'],
+                    "To (Chain)": dst['chain'],
+                    "To (Token)": dst['token'],
+                    "To (address)": str(dst['id'])[:7],
+                    "Amount to move ($)": amount_to_move,
+                    "Remaining Funds In Source ($)": src['running_balance'],
+                    "Operation Type": op_type,
+                    "OpCode": op_code
+                })
+                ordering_counter += 1
+            
+            src['available'] -= amount_to_move
+            dst['needed'] -= amount_to_move
+            
+            if src['available'] < 0.01: src_idx += 1
+            if dst['needed'] < 0.01: dst_idx += 1
+
+        # 2. Handle Leftover Sources (Market -> Wallet)
+        while src_idx < len(sources):
+            src = sources[src_idx]
+            if src['available'] > 0.01 and src['available'] >= min_move_thresh:
+                src['running_balance'] -= src['available']
+                transfer_steps.append({
+                    "Ordering": ordering_counter,
+                    "From": src['name'],
+                    "From (Chain)": src['chain'],
+                    "From (Token)": src['token'],
+                    "From (address)": str(src['id'])[:7],
+                    "To": "Wallet (Unallocated)",
+                    "To (Chain)": "Wallet",
+                    "To (Token)": "CASH",
+                    "To (address)": "Wallet",
+                    "Amount to move ($)": src['available'],
+                    "Remaining Funds In Source ($)": src['running_balance'],
+                    "Operation Type": "Cash Out",
+                    "OpCode": 0
+                })
+                ordering_counter += 1
+            src_idx += 1
+
+        # --- C. New Table: Source Asset -> Destination Asset Aggregation ---
+        if transfer_steps:
+            st.divider()
+            st.markdown("#### 🔗 Detailed Asset Flow")
+            st.caption("Aggregated view of funds moving from Source (Chain/Token) to Destination (Chain/Token).")
+            
+            df_steps = pd.DataFrame(transfer_steps)
+            
+            # Group by Source/Dest Assets
+            flow_agg = df_steps[df_steps['OpCode'] > 0].groupby(
+                ['From (Chain)', 'From (Token)', 'To (Chain)', 'To (Token)', 'Operation Type']
+            )['Amount to move ($)'].sum().reset_index()
+            
+            if not flow_agg.empty:
+                st.dataframe(
+                    flow_agg.style.format({
+                        "Amount to move ($)": "${:,.2f}"
+                    }),
+                    column_order=['From (Chain)', 'From (Token)', 'To (Chain)', 'To (Token)', 'Amount to move ($)', 'Operation Type'],
+                    width='stretch',
+                    hide_index=True
+                )
+            else:
+                st.info("No complex moves (Rebalance/Swap/Bridge) detected. Only Deposits or Withdrawals.")
+
+        st.divider()
+        st.subheader("📋 Execution Plan", help = 'Gives you steps to rebalance')
 
         # Logic for Stuck Warning in Plan
         stuck_df = df_res[df_res["Stuck Funds ($)"] > 0.01].copy()
@@ -1462,73 +1562,33 @@ if not df_selected.empty:
                 hide_index=True
             )
 
-        transfer_steps = []
-        src_idx, dst_idx = 0, 0
-        ordering_counter = 1
-        
-        # 1. Match Withdrawals/Cash to New Deposits
-        while src_idx < len(sources) and dst_idx < len(destinations):
-            src, dst = sources[src_idx], destinations[dst_idx]
-            amount_to_move = min(src['available'], dst['needed'])
-            
-            if amount_to_move > 0.01: 
-                dst['running_balance'] += amount_to_move
-                src['running_balance'] -= amount_to_move
-                
-                transfer_steps.append({
-                    "Ordering": ordering_counter,
-                    "From": src['name'],
-                    "From (Chain)": src['chain'],
-                    "From (address)": str(src['id'])[:7],
-                    "To": dst['name'],
-                    "To (Chain)": dst['chain'],
-                    "To (address)": str(dst['id'])[:7],
-                    "Amount to move ($)": amount_to_move,
-                    "Remaining Funds In Source ($)": src['running_balance']
-                })
-                ordering_counter += 1
-            
-            src['available'] -= amount_to_move
-            dst['needed'] -= amount_to_move
-            
-            if src['available'] < 0.01: src_idx += 1
-            if dst['needed'] < 0.01: dst_idx += 1
-
-        # 2. Handle Leftover Sources (Market -> Wallet)
-        while src_idx < len(sources):
-            src = sources[src_idx]
-            if src['available'] > 0.01 and src['available'] >= min_move_thresh:
-                src['running_balance'] -= src['available']
-                transfer_steps.append({
-                    "Ordering": ordering_counter,
-                    "From": src['name'],
-                    "From (Chain)": src['chain'],
-                    "From (address)": str(src['id'])[:7],
-                    "To": "Wallet (Unallocated)",
-                    "To (Chain)": "Wallet",
-                    "To (address)": "Wallet",
-                    "Amount to move ($)": src['available'],
-                    "Remaining Funds In Source ($)": src['running_balance']
-                })
-                ordering_counter += 1
-            src_idx += 1
-
         if transfer_steps:
             st.markdown("#### Market Rebalance Steps")
             df_actions = pd.DataFrame(transfer_steps)
             
+            # Add color highlights for Operation Type
+            def highlight_op(val):
+                if "1." in val: return 'color: #1b5e20; font-weight: bold;' # Green
+                if "2." in val: return 'color: #01579b; font-weight: bold;' # Blue
+                if "3." in val: return 'color: #b71c1c; font-weight: bold;' # Red
+                return ''
+
             styled_df = df_actions.style.format({
                 "Amount to move ($)": "${:,.2f}",
                 "Remaining Funds In Source ($)": "${:,.2f}"
             }).applymap(
                 lambda x: 'color: #ff4b4b;' if (isinstance(x, (int, float)) and x <= 0.01) else '', 
                 subset=['Remaining Funds In Source ($)']
+            ).applymap(
+                highlight_op,
+                subset=['Operation Type']
             )
             
             st.dataframe(
                 styled_df, 
                 column_order=[
                     "Ordering", 
+                    "Operation Type",
                     "From", "From (Chain)", "From (address)",
                     "To", "To (Chain)", "To (address)", 
                     "Amount to move ($)", 
