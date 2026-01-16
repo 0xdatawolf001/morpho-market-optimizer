@@ -5,6 +5,7 @@ import numpy as np
 import math
 from scipy.optimize import minimize, differential_evolution
 import time
+from datetime import datetime, timedelta, timezone
 import altair as alt
 
 # ==========================================
@@ -430,6 +431,85 @@ def fetch_user_positions(user_address):
         st.error(f"Error fetching user positions: {e}")
         
     return positions
+
+def fetch_historical_flows(market_ids_and_chains):
+    """
+    Fetches 30-day history for supplyShares and borrowShares.
+    Calculates a growth index starting at 1.0 for demand trends.
+    """
+    now = datetime.now(timezone.utc)
+    start_time = int((now - timedelta(days=30)).timestamp())
+    
+    historical_data = []
+    hist_bar = st.progress(0, text="Analyzing 30-day demand trends...")
+    
+    for idx, m in enumerate(market_ids_and_chains):
+        query = """
+        query GetMarketHistory($uniqueKey: String!, $chainId: Int!, $options: TimeseriesOptions) {
+            marketByUniqueKey(uniqueKey: $uniqueKey, chainId: $chainId) {
+                historicalState {
+                    supplyShares(options: $options) { x y }
+                    borrowShares(options: $options) { x y }
+                }
+            }
+        }
+        """
+        
+        variables = {
+            "uniqueKey": m['uniqueKey'],
+            "chainId": int(m['chainId']),
+            "options": {"startTimestamp": start_time, "interval": "DAY"}
+        }
+        
+        try:
+            resp = requests.post(MORPHO_API_URL, json={'query': query, 'variables': variables})
+            data = resp.json()
+            
+            if 'data' in data and data['data'].get('marketByUniqueKey'):
+                hist = data['data']['marketByUniqueKey']['historicalState']
+                df_sup = pd.DataFrame(hist['supplyShares'])
+                df_bor = pd.DataFrame(hist['borrowShares'])
+                
+                if not df_sup.empty and not df_bor.empty:
+                    # Merge supply and borrow shares
+                    df_merged = pd.merge(df_sup, df_bor, on='x', suffixes=('_sup', '_bor'))
+                    
+                    # Convert to numeric
+                    df_merged['y_sup'] = df_merged['y_sup'].astype(float)
+                    df_merged['y_bor'] = df_merged['y_bor'].astype(float)
+                    
+                    # Calculate Combined Total Shares
+                    df_merged['total_shares'] = df_merged['y_sup'] + df_merged['y_bor']
+                    
+                    # --- FIX: ENSURE ASCENDING SORT FOR INDEX BASELINE ---
+                    df_merged = df_merged.sort_values('x', ascending=True)
+                    
+                    # Calculate Growth Index relative to the START of the window
+                    initial_total = df_merged['total_shares'].iloc[0]
+                    
+                    if initial_total > 0:
+                        df_merged['indexed_demand'] = df_merged['total_shares'] / initial_total
+                    else:
+                        # Safety: If market starts at 0, index stays at 1.0 until first movement
+                        df_merged['indexed_demand'] = 1.0
+                        
+                    short_id = m['uniqueKey'][0:6]
+                    unique_label = f"{m['name']} [{short_id}]"
+                    
+                    df_merged['Market'] = unique_label
+                    df_merged['date'] = pd.to_datetime(df_merged['x'], unit='s')
+                    
+                    historical_data.append(df_merged[['date', 'Market', 'indexed_demand']])
+        except Exception as e:
+            st.error(f"Error fetching history for {m['uniqueKey']}: {e}")
+            
+        hist_bar.progress((idx + 1) / len(market_ids_and_chains))
+        
+    hist_bar.empty()
+    
+    if historical_data:
+        return pd.concat(historical_data)
+    return pd.DataFrame()
 
 # ==========================================
 # 3. OPTIMIZER
@@ -1049,6 +1129,9 @@ if not df_selected.empty:
             )
 
     if st.button("🚀 Run Optimization", type="primary", width='stretch'):
+        # Add this line to clear previous history cache
+        if 'hist_demand_df' in st.session_state:
+            del st.session_state.hist_demand_df
         market_data_list = fetch_live_market_details(df_selected)
         for m in market_data_list:
             m['existing_balance_usd'] = st.session_state.balance_cache.get(m['Market ID'], 0.0)
@@ -1235,34 +1318,125 @@ if not df_selected.empty:
             st.altair_chart(line_chart, width='stretch')
 
         st.divider()
-        st.markdown("**Allocation Comparison**")
+        # --- NEW LAYOUT: 2 COLUMNS ---
+        col_alloc, col_demand = st.columns(2)
         
-        bar_data = []
-        for idx, m in enumerate(market_data_list):
-            m_name = f"{m['Loan Token']}/{m['Collateral']}"
-            y_val = best_yield_alloc[idx]
-            w_val = whale_alloc[idx]
-            f_val = frontier_alloc[idx]
-            l_val = liquid_alloc[idx]
+        # --- LEFT: ALLOCATION CHART (FIXED FOR DUPLICATES) ---
+        with col_alloc:
+            st.markdown("**Allocation Comparison**")
             
-            if max(y_val, w_val, f_val, l_val) > 1:
-                bar_data.append({"Market": m_name, "Strategy": "Best Yield", "Alloc ($)": y_val})
-                bar_data.append({"Market": m_name, "Strategy": "Whale Shield", "Alloc ($)": w_val})
-                bar_data.append({"Market": m_name, "Strategy": "Frontier", "Alloc ($)": f_val})
-                bar_data.append({"Market": m_name, "Strategy": "Liquid-Yield", "Alloc ($)": l_val})
+            bar_data = []
+            for idx, m in enumerate(market_data_list):
+                # Apply 6-char suffix here as well
+                short_id = m['Market ID'][0:6]
+                m_name = f"{m['Loan Token']}/{m['Collateral']} ({short_id})"
+                
+                y_val = best_yield_alloc[idx]
+                w_val = whale_alloc[idx]
+                f_val = frontier_alloc[idx]
+                l_val = liquid_alloc[idx]
+                
+                if max(y_val, w_val, f_val, l_val) > 1:
+                    bar_data.append({"Market": m_name, "Strategy": "Best Yield", "Alloc ($)": y_val})
+                    bar_data.append({"Market": m_name, "Strategy": "Whale Shield", "Alloc ($)": w_val})
+                    bar_data.append({"Market": m_name, "Strategy": "Frontier", "Alloc ($)": f_val})
+                    bar_data.append({"Market": m_name, "Strategy": "Liquid-Yield", "Alloc ($)": l_val})
             
-        if bar_data:
-            df_bar = pd.DataFrame(bar_data)
-            bar_chart = alt.Chart(df_bar).mark_bar().encode(
-                x=alt.X('Market:N', title="Market Pair", axis=alt.Axis(labelAngle=-45)),
-                y=alt.Y('Alloc ($):Q', title="Allocation (USD)", scale=alt.Scale(zero=True)),
-                xOffset='Strategy:N',
-                color=alt.Color('Strategy:N', scale=alt.Scale(domain=STRAT_DOMAIN, range=STRAT_RANGE)),
-                tooltip=['Market', 'Strategy', alt.Tooltip('Alloc ($)', format='$,.2f')]
-            ).properties(height=400).configure_view(stroke=None)
-            st.altair_chart(bar_chart, width='stretch')
-        else:
-            st.info("No significant allocations.")
+            if bar_data:
+                df_bar = pd.DataFrame(bar_data)
+                bar_chart = alt.Chart(df_bar).mark_bar().encode(
+                    x=alt.X('Market:N', title="Market Pair (ID)", axis=alt.Axis(labelAngle=-45)),
+                    y=alt.Y('Alloc ($):Q', title="Allocation (USD)", scale=alt.Scale(zero=True)),
+                    xOffset='Strategy:N',
+                    color=alt.Color('Strategy:N', scale=alt.Scale(domain=STRAT_DOMAIN, range=STRAT_RANGE)),
+                    tooltip=['Market', 'Strategy', alt.Tooltip('Alloc ($)', format='$,.2f')]
+                ).properties(height=350).configure_view(stroke=None)
+                st.altair_chart(bar_chart, use_container_width=True)
+            else:
+                st.info("No significant allocations.")
+
+# --- RIGHT: DEMAND TRENDS CHART ---
+        with col_demand:
+            st.markdown("**30-Day Demand Trend (Indexed)**")
+            st.caption("Growth of Supply + Borrow shares relative to start of period (Baseline = 1.0). Click legend to highlight.")
+            
+            # 1. Prepare list for fetching
+            targets_for_history = []
+            for m in market_data_list:
+                targets_for_history.append({
+                    "uniqueKey": m['Market ID'],
+                    "chainId": m['ChainID'],
+                    "name": f"{m['Loan Token']}/{m['Collateral']}"
+                })
+            
+            # 2. Fetch Data (Cached)
+            if 'hist_demand_df' not in st.session_state:
+                st.session_state.hist_demand_df = fetch_historical_flows(targets_for_history)
+            
+            df_history = st.session_state.hist_demand_df
+            
+            if not df_history.empty:
+                # --- INTERACTIVE ELEMENTS ---
+                selection = alt.selection_point(fields=['Market'], bind='legend')
+                hover = alt.selection_point(
+                    fields=['date'], 
+                    nearest=True, 
+                    on='mouseover', 
+                    empty=False, 
+                    clear='mouseout'
+                )
+
+                # 3. Base Line Chart
+                base = alt.Chart(df_history).encode(
+                    x=alt.X('date:T', title=None, axis=alt.Axis(format='%b %d')),
+                    y=alt.Y('indexed_demand:Q', 
+                            title='Growth Index', 
+                            axis=alt.Axis(format='.2f', grid=True),
+                            scale=alt.Scale(zero=False)), 
+                    color=alt.Color('Market:N', legend=alt.Legend(
+                        orient='bottom', 
+                        title='Market ID & Pair',
+                        columns=2,
+                        labelLimit=0,
+                        symbolLimit=100,
+                        padding=10
+                    ))
+                )
+
+                # The visible lines
+                lines = base.mark_line(interpolate='monotone').encode(
+                    opacity=alt.condition(selection, alt.value(1), alt.value(0.15)),
+                    strokeWidth=alt.condition(selection, alt.value(2.5), alt.value(1))
+                ).add_params(selection)
+
+                # Transparent selectors for hover behavior
+                selectors = base.mark_point().encode(
+                    opacity=alt.value(0),
+                    tooltip=[
+                        alt.Tooltip('date:T', title='Date', format='%Y-%m-%d'),
+                        alt.Tooltip('Market:N', title='Market'),
+                        alt.Tooltip('indexed_demand:Q', title='Index Value', format='.3f')
+                    ]
+                ).add_params(hover)
+
+                # Points that appear on hover
+                points = base.mark_point().encode(
+                    opacity=alt.condition(hover, alt.value(1), alt.value(0))
+                )
+
+                # Vertical rule that follows mouse
+                rules = base.mark_rule(color='white', strokeWidth=0.5).encode(
+                    opacity=alt.condition(hover, alt.value(0.3), alt.value(0))
+                ).transform_filter(hover)
+
+                # Layering the chart components
+                final_chart = alt.layer(
+                    lines, selectors, points, rules
+                ).properties(height=350).interactive()
+                
+                st.altair_chart(final_chart, use_container_width=True)
+            else:
+                st.info("No historical data available for selected markets.")
 
         st.divider()
         st.subheader("🔍 Results")
