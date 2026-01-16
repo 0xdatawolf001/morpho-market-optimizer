@@ -144,11 +144,12 @@ def to_atomic_units(amount_adjusted: float, decimals: int) -> str:
 
 def get_lifi_quote(from_chain, to_chain, from_token, to_token, amount_atomic, user_address, user_slippage_decimal):
     """
-    Calls LI.FI API with smart slippage escalation.
-    Extracts costs, amounts, and the execution path (route steps).
+    Calls LI.FI /v1/advanced/routes API to match Jumper.exchange efficiency.
+    Includes timing strategies and multi-step route options.
     """
-    base_url = "https://li.quest/v1/quote"
+    url = "https://li.quest/v1/advanced/routes"
     
+    # Slippage Ladder
     ladder = [user_slippage_decimal]
     standard_tiers = [0.0005, 0.001, 0.005, 0.01, 0.05]
     
@@ -164,63 +165,97 @@ def get_lifi_quote(from_chain, to_chain, from_token, to_token, amount_atomic, us
     last_error = None
 
     for slippage_try in ladder:
-        params = {
-            "fromChain": str(from_chain),
-            "toChain": str(to_chain),
-            "fromToken": from_token,
-            "toToken": to_token,
+        # Construct Payload for /advanced/routes
+        payload = {
+            "fromChainId": int(from_chain),
             "fromAmount": amount_atomic,
-            "fromAddress": user_address,
-            "slippage": slippage_try, 
-            "order": "CHEAPEST"
+            "fromTokenAddress": from_token,
+            "toChainId": int(to_chain),
+            "toTokenAddress": to_token,
+            "options": {
+                "slippage": slippage_try,
+                "order": "CHEAPEST", # Matches Jumper defaults for best rate
+                "allowSwitchChain": True, # Allows multi-step bridge + swap
+                "allowDestinationCall": True, # Essential for efficient solving
+                # "fee": 0.0, # Explicitly 0 ensures we see the raw cost without API fees
+                "timing": {
+                    "routeTimingStrategies": [
+                        {
+                            "strategy": "minWaitTime",
+                            "minWaitTimeMs": 1500, # Wait 1.5s to gather best quotes
+                            "startingExpectedResults": 6,
+                            "reduceEveryMs": 500
+                        }
+                    ]
+                }
+            }
+        }
+
+        # Add fromAddress if valid (helps with balance checks/gas estimation)
+        if user_address and len(user_address) > 10:
+            payload["fromAddress"] = user_address
+
+        headers = {
+            "Content-Type": "application/json",
+            "accept": "application/json"
         }
         
         for attempt in range(MAX_RETRIES):
             try:
-                response = requests.get(base_url, params=params, timeout=10)
+                response = requests.post(url, json=payload, headers=headers, timeout=15)
                 
                 if response.status_code == 200:
                     data = response.json()
+                    routes = data.get('routes', [])
                     
-                    # 1. Costs
-                    estimate = data.get('estimate', {})
-                    gas_costs = estimate.get('gasCosts', [])
-                    gas_usd = sum([float(g.get('amountUSD', 0)) for g in gas_costs])
+                    if not routes:
+                        last_error = "No routes found."
+                        break # Try next slippage tier or exit
                     
-                    fee_costs = estimate.get('feeCosts', [])
-                    fee_usd = sum([float(f.get('amountUSD', 0)) for f in fee_costs])
+                    # We selected "CHEAPEST" in options, so routes[0] is the best one
+                    best_route = routes[0]
                     
-                    # 2. Amounts
-                    amount_in_usd = float(estimate.get('fromAmountUSD', 0))
-                    amount_out_usd = float(estimate.get('toAmountUSD', 0))
+                    # 1. Amounts
+                    amount_in_usd = float(best_route.get('fromAmountUSD', 0))
+                    amount_out_usd = float(best_route.get('toAmountUSD', 0))
                     
-                    # 3. Value Loss
-                    slippage_loss = max(0.0, amount_in_usd - amount_out_usd)
-                    total_cost = gas_usd + fee_usd + slippage_loss
-
-                    # 4. Route Path Extraction
+                    # 2. Costs
+                    # gasCostUSD is provided at the top level of the route object
+                    gas_usd = float(best_route.get('gasCostUSD', 0))
+                    
+                    # Fee costs are nested in steps. We sum them up for display.
+                    fee_usd = 0.0
+                    steps = best_route.get('steps', [])
                     path_steps = []
-                    included_steps = data.get('includedSteps', [])
                     
-                    if included_steps:
-                        for step in included_steps:
-                            # Try to get the pretty name (e.g. Uniswap V3) then the key (e.g. uniswap)
-                            tool_name = step.get('toolDetails', {}).get('name') or step.get('tool')
-                            if tool_name:
-                                path_steps.append(tool_name)
-                    else:
-                        # Fallback to main tool if includedSteps is empty
-                        main_tool = data.get('toolDetails', {}).get('name') or data.get('tool')
-                        if main_tool:
-                            path_steps.append(main_tool)
+                    for step in steps:
+                        # Sum Fees
+                        step_fees = step.get('estimate', {}).get('feeCosts', [])
+                        if step_fees:
+                            fee_usd += sum([float(f.get('amountUSD', 0)) for f in step_fees])
+                        
+                        # Build Execution Path String
+                        tool_name = step.get('toolDetails', {}).get('name') or step.get('tool')
+                        if tool_name:
+                            path_steps.append(tool_name)
+
+                    # 3. Total Economic Cost
+                    # Value Loss (Slippage + Token Fees) + Gas + Explicit Fees (if any separate)
+                    # Note: amount_out_usd usually already accounts for token-deducted fees.
+                    slippage_loss = max(0.0, amount_in_usd - amount_out_usd)
                     
-                    execution_path = " ➡️ ".join(path_steps) if path_steps else "Direct Transfer"
+                    # Total Cost for ROI calc = Gas + Value Loss (which includes slippage & fees taken from token)
+                    # We add fee_usd only if it wasn't already deducted from toAmount (usually feeCosts explains the diff)
+                    # To be safe for ROI: Input Value - Output Value + Gas Paid is the user's net cost.
+                    total_cost = (amount_in_usd - amount_out_usd) + gas_usd
+
+                    execution_path = " ➡️ ".join(path_steps) if path_steps else "Optimized Route"
                     
                     return {
                         "success": True,
                         "total_cost": total_cost,
                         "gas": gas_usd,
-                        "fees": fee_usd,
+                        "fees": fee_usd, # For display purposes
                         "slippage_cost": slippage_loss,
                         "amount_in": amount_in_usd,
                         "amount_out": amount_out_usd,
@@ -233,7 +268,7 @@ def get_lifi_quote(from_chain, to_chain, from_token, to_token, amount_atomic, us
                     continue
                 
                 else:
-                    last_error = response.text
+                    last_error = f"API Error {response.status_code}: {response.text}"
                     break 
                     
             except Exception as e:
