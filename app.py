@@ -1624,9 +1624,11 @@ if not df_selected.empty:
                 transfer_steps.append({
                     "Ordering": ordering_counter,
                     "From": src['name'],
+                    "From Market ID": src.get('id', 'N/A')[:7],
                     "From (Chain)": src['chain'],
                     "From (Token)": src['token'],
                     "To": dst['name'],
+                    "To Market ID": dst.get('id', 'N/A')[:7],
                     "To (Chain)": dst['chain'],
                     "To (Token)": dst['token'],
                     "Amount to move ($)": amount_to_move,
@@ -1694,8 +1696,8 @@ if not df_selected.empty:
                 df_actions.style.format({
                     "Amount to move ($)": "${:,.2f}",
                     "Remaining Funds In Source ($)": "${:,.2f}"
-                }).applymap(highlight_op, subset=['Operation Type']), 
-                column_order=["Ordering", "Operation Type", "From", "From (Chain)", "To", "To (Chain)", "Amount to move ($)", "Remaining Funds In Source ($)"],
+                }).applymap(highlight_op, subset=['Operation Type']).applymap(lambda x: 'color: red' if x < 0.01 else '', subset=['Remaining Funds In Source ($)']), 
+                column_order=["Ordering", "Operation Type", "From", "From Market ID", "From (Chain)", "From (Token)", "To", "To Market ID", "To (Chain)", "To (Token)", "Amount to move ($)", "Remaining Funds In Source ($)"],
                 width='stretch', 
                 hide_index=True
             )
