@@ -145,26 +145,18 @@ def to_atomic_units(amount_adjusted: float, decimals: int) -> str:
 def get_lifi_quote(from_chain, to_chain, from_token, to_token, amount_atomic, user_address, user_slippage_decimal):
     """
     Calls LI.FI API with smart slippage escalation.
-    1. Tries user_slippage_decimal first.
-    2. If fails, tries standard tiers: 0.05%, 0.1%, 0.5%, 1.0%, 5.0% (skipping those stricter than user input).
-    
-    Returns dict with costs, amounts, and the actual slippage used.
+    Extracts costs, amounts, and the execution path (route steps).
     """
     base_url = "https://li.quest/v1/quote"
     
-    # Define the ladder of slippage tolerances to attempt
-    # We always start with the user's preference
     ladder = [user_slippage_decimal]
     standard_tiers = [0.0005, 0.001, 0.005, 0.01, 0.05]
     
-    # Add standard tiers to ladder if they are looser than user input
     for tier in standard_tiers:
         if tier > user_slippage_decimal:
             ladder.append(tier)
             
-    # Remove duplicates and keep order
     ladder = sorted(list(set(ladder)))
-    # Ensure user input is first index if it was sorted out
     if ladder[0] != user_slippage_decimal:
         ladder.remove(user_slippage_decimal)
         ladder.insert(0, user_slippage_decimal)
@@ -183,29 +175,46 @@ def get_lifi_quote(from_chain, to_chain, from_token, to_token, amount_atomic, us
             "order": "CHEAPEST"
         }
         
-        # Inner Retry Loop for Network/Rate Limits
         for attempt in range(MAX_RETRIES):
             try:
-                # print(f"LI.FI Attempt: Slippage {slippage_try*100:.2f}% | Try {attempt+1}")
                 response = requests.get(base_url, params=params, timeout=10)
                 
                 if response.status_code == 200:
                     data = response.json()
                     
                     # 1. Costs
-                    gas_costs = data.get('estimate', {}).get('gasCosts', [])
+                    estimate = data.get('estimate', {})
+                    gas_costs = estimate.get('gasCosts', [])
                     gas_usd = sum([float(g.get('amountUSD', 0)) for g in gas_costs])
                     
-                    fee_costs = data.get('estimate', {}).get('feeCosts', [])
+                    fee_costs = estimate.get('feeCosts', [])
                     fee_usd = sum([float(f.get('amountUSD', 0)) for f in fee_costs])
                     
-                    # 2. Amounts (Before vs Final Simulated)
-                    amount_in_usd = float(data.get('estimate', {}).get('fromAmountUSD', 0))
-                    amount_out_usd = float(data.get('estimate', {}).get('toAmountUSD', 0))
+                    # 2. Amounts
+                    amount_in_usd = float(estimate.get('fromAmountUSD', 0))
+                    amount_out_usd = float(estimate.get('toAmountUSD', 0))
                     
-                    # 3. Value Loss (Slippage Cost)
+                    # 3. Value Loss
                     slippage_loss = max(0.0, amount_in_usd - amount_out_usd)
                     total_cost = gas_usd + fee_usd + slippage_loss
+
+                    # 4. Route Path Extraction
+                    path_steps = []
+                    included_steps = data.get('includedSteps', [])
+                    
+                    if included_steps:
+                        for step in included_steps:
+                            # Try to get the pretty name (e.g. Uniswap V3) then the key (e.g. uniswap)
+                            tool_name = step.get('toolDetails', {}).get('name') or step.get('tool')
+                            if tool_name:
+                                path_steps.append(tool_name)
+                    else:
+                        # Fallback to main tool if includedSteps is empty
+                        main_tool = data.get('toolDetails', {}).get('name') or data.get('tool')
+                        if main_tool:
+                            path_steps.append(main_tool)
+                    
+                    execution_path = " ➡️ ".join(path_steps) if path_steps else "Direct Transfer"
                     
                     return {
                         "success": True,
@@ -215,24 +224,21 @@ def get_lifi_quote(from_chain, to_chain, from_token, to_token, amount_atomic, us
                         "slippage_cost": slippage_loss,
                         "amount_in": amount_in_usd,
                         "amount_out": amount_out_usd,
-                        "slippage_used": slippage_try
+                        "slippage_used": slippage_try,
+                        "execution_path": execution_path
                     }
                 
                 elif response.status_code == 429:
                     time.sleep(RETRY_BACKOFF * (attempt + 1))
-                    continue # Retry same slippage
+                    continue
                 
                 else:
-                    # If 404 or specific route errors, break inner loop to try next slippage tier
                     last_error = response.text
                     break 
                     
             except Exception as e:
                 print(f"LI.FI Exception: {e}")
                 time.sleep(RETRY_BACKOFF)
-        
-        # If we are here, the inner loop finished without returning success.
-        # Loop continues to next slippage_try in ladder
     
     return {"success": False, "error": last_error}
 
@@ -1678,9 +1684,6 @@ if not df_selected.empty:
                     st.write("") # Spacer
                     run_analysis = st.button("Analyze Gas, Slippage & ROI via LI.FI", type="primary")
 
-# Locate the 'if run_analysis:' block (Ctrl+F: if run_analysis:) 
-# and replace the entire block with the following:
-
                 if run_analysis:
                     # 1. Batching Logic: Group by Route
                     batches = {}
@@ -1752,6 +1755,7 @@ if not df_selected.empty:
                         amt_in_display = f"${batch_total_usd:,.2f}" # Default to theoretical if fail
                         amt_out_display = "$0.00"
                         slippage_used_display = "Failed"
+                        execution_path_display = "No Route Found"
                         
                         signal = "⚪ Unknown"
 
@@ -1768,6 +1772,7 @@ if not df_selected.empty:
                             
                             # Show Slippage Used as Percentage
                             slippage_used_display = f"{quote_res['slippage_used']*100:.2f}%"
+                            execution_path_display = quote_res['execution_path']
 
                             # --- A. Asset-Chain Break-even ---
                             if asset_hourly_yield_usd > 0:
@@ -1801,6 +1806,7 @@ if not df_selected.empty:
                         analysis_results.append({
                             "Signal": signal,
                             "Route": f"{batch['src_token_symbol']} ({batch['src_chain_name']}) ➡️ {batch['dst_token_symbol']} ({batch['dst_chain_name']})",
+                            "Execution Path": execution_path_display,
                             "Amount In": amt_in_display,
                             "Simulated Out": amt_out_display,
                             "Portfolio APY Contribution": portfolio_apy_contribution_pct,
@@ -1821,6 +1827,7 @@ if not df_selected.empty:
                         st.dataframe(
                             pd.DataFrame(analysis_results),
                             column_config={
+                                "Execution Path": st.column_config.TextColumn(help="The sequence of DEXs and Bridges used in this route.", width="large"),
                                 "Amount In": st.column_config.TextColumn(help="USD Value of tokens sent"),
                                 "Simulated Out": st.column_config.TextColumn(help="USD Value of tokens received (after fees/slippage)"),
                                 "Portfolio APY Contribution": st.column_config.NumberColumn(
