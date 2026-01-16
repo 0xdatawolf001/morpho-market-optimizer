@@ -1670,8 +1670,8 @@ if not df_selected.empty:
         for _, row in grouped_withdrawals.iterrows():
             src_chain = row['Chain']
             src_token = row['Token']
-            total_withdrawal = abs(row['Net Move ($)'])
-            remaining_val = total_withdrawal
+            total_moved = abs(row['Net Move ($)'])
+            remaining_val = total_moved
             
             # 1. Match: Rebalance (Same Chain, Same Token)
             specific_cap = token_capacities.get((src_chain, src_token), 0.0)
@@ -1696,7 +1696,7 @@ if not df_selected.empty:
             withdraw_logic.append({
                 "Source Chain": src_chain,
                 "Asset": src_token,
-                "Total Withdrawing": total_withdrawal,
+                "Total Capital Affected": total_moved,
                 "1. Keep In Chain And Same Asset (Rebalance)": matched_rebalance,
                 "2. Swap Asset But In Same Chain (Internal)": matched_swap,
                 "3. Bridge Out": matched_bridge
@@ -1706,7 +1706,7 @@ if not df_selected.empty:
             df_ops = pd.DataFrame(withdraw_logic)
             st.dataframe(
                 df_ops.style.format({
-                    "Total Withdrawing": "${:,.2f}",
+                    "Total Capital Affected": "${:,.2f}",
                     "1. Keep In Chain And Same Asset (Rebalance)": "${:,.2f}",
                     "2. Swap Asset But In Same Chain (Internal)": "${:,.2f}",
                     "3. Bridge Out": "${:,.2f}"
@@ -1878,8 +1878,8 @@ if not df_selected.empty:
             
 # --- LI.FI ANALYSIS SECTION ---
             st.markdown("---")
-            st.markdown("### 🕵️‍♀️ Opportunity Cost Analysis (Batched)")
-            st.caption("Aggregates moves by route. Simulates execution to find actual costs and break-even time. Note that this is just an estimate and Jumper may give different values")
+            st.markdown("### 🕵️‍♀️ Briding Cost Breakeven")
+            st.caption("Determines if Bridging/Swapping is worth it. Aggregates moves by route. Simulates execution to find actual costs and break-even time. Note that this is just an estimate and Jumper may give different values")
             
             # Filter for Swaps/Bridges only (OpCode 2 or 3)
             complex_moves = [x for x in transfer_steps if x.get('OpCode') in [2, 3]]
