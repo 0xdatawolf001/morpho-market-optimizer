@@ -1318,64 +1318,88 @@ if not df_selected.empty:
             st.altair_chart(line_chart, width='stretch')
 
         st.divider()
-        # --- NEW LAYOUT: 2 COLUMNS ---
-        col_alloc, col_demand = st.columns(2)
         
-        # --- LEFT: ALLOCATION CHART (FIXED FOR DUPLICATES) ---
-        with col_alloc:
-            st.markdown("**Allocation Comparison**")
+        # --- FULL WIDTH: ALLOCATION CHART ---
+        st.subheader("⚖️ Allocation Comparison")
+        
+        bar_data = []
+        for idx, m in enumerate(market_data_list):
+            # Apply 6-char suffix here as well
+            short_id = m['Market ID'][0:6]
+            m_name = f"{m['Loan Token']}/{m['Collateral']} ({short_id})"
             
-            bar_data = []
-            for idx, m in enumerate(market_data_list):
-                # Apply 6-char suffix here as well
-                short_id = m['Market ID'][0:6]
-                m_name = f"{m['Loan Token']}/{m['Collateral']} ({short_id})"
-                
-                y_val = best_yield_alloc[idx]
-                w_val = whale_alloc[idx]
-                f_val = frontier_alloc[idx]
-                l_val = liquid_alloc[idx]
-                
-                if max(y_val, w_val, f_val, l_val) > 1:
-                    bar_data.append({"Market": m_name, "Strategy": "Best Yield", "Alloc ($)": y_val})
-                    bar_data.append({"Market": m_name, "Strategy": "Whale Shield", "Alloc ($)": w_val})
-                    bar_data.append({"Market": m_name, "Strategy": "Frontier", "Alloc ($)": f_val})
-                    bar_data.append({"Market": m_name, "Strategy": "Liquid-Yield", "Alloc ($)": l_val})
+            y_val = best_yield_alloc[idx]
+            w_val = whale_alloc[idx]
+            f_val = frontier_alloc[idx]
+            l_val = liquid_alloc[idx]
             
-            if bar_data:
-                df_bar = pd.DataFrame(bar_data)
-                bar_chart = alt.Chart(df_bar).mark_bar().encode(
-                    x=alt.X('Market:N', title="Market Pair (ID)", axis=alt.Axis(labelAngle=-45)),
-                    y=alt.Y('Alloc ($):Q', title="Allocation (USD)", scale=alt.Scale(zero=True)),
-                    xOffset='Strategy:N',
-                    color=alt.Color('Strategy:N', scale=alt.Scale(domain=STRAT_DOMAIN, range=STRAT_RANGE)),
-                    tooltip=['Market', 'Strategy', alt.Tooltip('Alloc ($)', format='$,.2f')]
-                ).properties(height=350).configure_view(stroke=None)
-                st.altair_chart(bar_chart, use_container_width=True)
-            else:
-                st.info("No significant allocations.")
+            if max(y_val, w_val, f_val, l_val) > 1:
+                bar_data.append({"Market": m_name, "Strategy": "Best Yield", "Alloc ($)": y_val})
+                bar_data.append({"Market": m_name, "Strategy": "Whale Shield", "Alloc ($)": w_val})
+                bar_data.append({"Market": m_name, "Strategy": "Frontier", "Alloc ($)": f_val})
+                bar_data.append({"Market": m_name, "Strategy": "Liquid-Yield", "Alloc ($)": l_val})
+        
+        if bar_data:
+            df_bar = pd.DataFrame(bar_data)
+            bar_chart = alt.Chart(df_bar).mark_bar().encode(
+                x=alt.X('Market:N', title="Market Pair (ID)", axis=alt.Axis(labelAngle=-45)),
+                y=alt.Y('Alloc ($):Q', title="Allocation (USD)", scale=alt.Scale(zero=True)),
+                xOffset='Strategy:N',
+                color=alt.Color('Strategy:N', scale=alt.Scale(domain=STRAT_DOMAIN, range=STRAT_RANGE)),
+                tooltip=['Market', 'Strategy', alt.Tooltip('Alloc ($)', format='$,.2f')]
+            ).properties(height=400).configure_view(stroke=None) # Increased height
+            st.altair_chart(bar_chart, use_container_width=True)
+        else:
+            st.info("No significant allocations.")
 
-# --- RIGHT: DEMAND TRENDS CHART ---
-        with col_demand:
-            st.markdown("**30-Day Demand Trend (Indexed)**")
-            st.caption("Growth of Supply + Borrow shares relative to start of period (Baseline = 1.0). Click legend to highlight.")
+        st.divider()
+
+        # --- FULL WIDTH: DEMAND TRENDS CHART ---
+        d_col_header, d_col_filter = st.columns([2, 1])
+        with d_col_header:
+            st.subheader("📈 30-Day Demand Trend (Indexed)")
+            st.caption("Growth of Supply + Borrow shares relative to start of period (Baseline = 1.0).")
+        
+        # 1. Prepare list for fetching
+        targets_for_history = []
+        for m in market_data_list:
+            targets_for_history.append({
+                "uniqueKey": m['Market ID'],
+                "chainId": m['ChainID'],
+                "name": f"{m['Loan Token']}/{m['Collateral']}"
+            })
+        
+        # 2. Fetch Data (Cached)
+        if 'hist_demand_df' not in st.session_state:
+            st.session_state.hist_demand_df = fetch_historical_flows(targets_for_history)
+        
+        df_history = st.session_state.hist_demand_df
+        
+        if not df_history.empty:
             
-            # 1. Prepare list for fetching
-            targets_for_history = []
-            for m in market_data_list:
-                targets_for_history.append({
-                    "uniqueKey": m['Market ID'],
-                    "chainId": m['ChainID'],
-                    "name": f"{m['Loan Token']}/{m['Collateral']}"
-                })
+            # --- FILTER LOGIC ---
+            # Calculate the final value for every market to determine trend
+            trend_summary = df_history.sort_values('date').groupby('Market')['indexed_demand'].last()
             
-            # 2. Fetch Data (Cached)
-            if 'hist_demand_df' not in st.session_state:
-                st.session_state.hist_demand_df = fetch_historical_flows(targets_for_history)
+            with d_col_filter:
+                filter_mode = st.radio(
+                    "Filter Trends:",
+                    ["All", "Growth (> 1.0)", "Decay (≤ 1.0)"],
+                    horizontal=True,
+                    key="trend_filter_radio"
+                )
+
+            # Apply Filter
+            markets_to_show = trend_summary.index.tolist() # Default All
             
-            df_history = st.session_state.hist_demand_df
+            if "Growth" in filter_mode:
+                markets_to_show = trend_summary[trend_summary > 1.0].index.tolist()
+            elif "Decay" in filter_mode:
+                markets_to_show = trend_summary[trend_summary <= 1.0].index.tolist()
             
-            if not df_history.empty:
+            df_hist_filtered = df_history[df_history['Market'].isin(markets_to_show)]
+
+            if not df_hist_filtered.empty:
                 # --- INTERACTIVE ELEMENTS ---
                 selection = alt.selection_point(fields=['Market'], bind='legend')
                 hover = alt.selection_point(
@@ -1387,7 +1411,7 @@ if not df_selected.empty:
                 )
 
                 # 3. Base Line Chart
-                base = alt.Chart(df_history).encode(
+                base = alt.Chart(df_hist_filtered).encode(
                     x=alt.X('date:T', title=None, axis=alt.Axis(format='%b %d')),
                     y=alt.Y('indexed_demand:Q', 
                             title='Growth Index', 
@@ -1396,7 +1420,7 @@ if not df_selected.empty:
                     color=alt.Color('Market:N', legend=alt.Legend(
                         orient='bottom', 
                         title='Market ID & Pair',
-                        columns=2,
+                        columns=4, # More columns since it's full width
                         labelLimit=0,
                         symbolLimit=100,
                         padding=10
@@ -1429,14 +1453,16 @@ if not df_selected.empty:
                     opacity=alt.condition(hover, alt.value(0.3), alt.value(0))
                 ).transform_filter(hover)
 
-                # Layering the chart components
+                # Layering the chart components - Height increased to 450
                 final_chart = alt.layer(
                     lines, selectors, points, rules
-                ).properties(height=350).interactive()
+                ).properties(height=450).interactive()
                 
                 st.altair_chart(final_chart, use_container_width=True)
             else:
-                st.info("No historical data available for selected markets.")
+                st.info(f"No markets found matching filter: {filter_mode}")
+        else:
+            st.info("No historical data available for selected markets.")
 
         st.divider()
         st.subheader("🔍 Results")
