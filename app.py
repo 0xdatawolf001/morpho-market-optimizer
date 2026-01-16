@@ -1336,7 +1336,7 @@ if not df_selected.empty:
             
             # Action State Logic
             if net_move > 0.01:
-                action = "🟢 DEPOSIT/TRANSFER"
+                action = "🟢 DEPOSIT"
             elif net_move < -0.01:
                 if actual_withdrawable <= 0.01:
                     action = "⚠️ STUCK"
