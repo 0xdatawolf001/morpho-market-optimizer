@@ -633,6 +633,13 @@ class RebalanceOptimizer:
             whale_cap_factor = self.max_dominance_ratio / (1.0 - self.max_dominance_ratio)
 
         for m in self.markets:
+            # --- FORCE EXIT LOGIC ---
+            # If user marked this market for Force Exit, strict bound is 0.0
+            if m.get('force_exit', False):
+                standard_bounds.append((0.0, 0.0))
+                whale_bounds.append((0.0, 0.0))
+                continue
+
             # A. Standard Bound: Min(Budget, Portfolio Cap)
             standard_bounds.append((0.0, min(self.total_budget, port_cap_usd)))
             
@@ -662,8 +669,8 @@ class RebalanceOptimizer:
                     f"⚠️ **Safety Limits Ignored:** Total Budget (\${self.total_budget:,.0f}) exceeds your safety caps. "
                     "Optimizer reverted to standard bounds to ensure full investment."
                 )
-                whale_bounds = [(0.0, self.total_budget)] * n
-                standard_bounds = [(0.0, self.total_budget)] * n
+                whale_bounds = [(0.0, self.total_budget) if b[1] > 0 else (0.0, 0.0) for b in standard_bounds]
+                # Note: We keep Force Exits (0.0) even in overflow mode
             else:
                 self.capacity_warning = (
                     f"⚠️ **Budget Limited by Safety Caps:** Your total budget (\${self.total_budget:,.0f}) exceeds the "
@@ -983,7 +990,13 @@ with col_scope:
 
 with col_param:
     st.subheader("3. Parameters")
-    new_cash = st.number_input("Additional New Cash (USD)", value=0.0, step=1000.0)
+    # UPDATED: Allows negative input for withdrawal simulation
+    new_cash = st.number_input(
+        "Additional New Cash / Withdrawal (USD)", 
+        value=0.0, 
+        step=1000.0,
+        help="Positive value = Add Capital. Negative value = Withdraw Capital (Optimizer determines best sell-off)."
+    )
 
     # NEW: Portfolio Cap
     max_port_alloc = st.number_input(
@@ -1023,6 +1036,9 @@ if not df_selected.empty:
     df_selected['Existing Balance (USD)'] = df_selected['Market ID'].apply(
         lambda x: st.session_state.balance_cache.get(x, 0.0)
     )
+    
+    # 2. Add Force Exit Column (Default False)
+    df_selected['Force Exit'] = False
 
     # Add the URL column
     df_selected['Link To Market'] = df_selected.apply(
@@ -1044,13 +1060,13 @@ if not df_selected.empty:
                         val = 0.0
                     st.session_state.balance_cache[m_id] = val
 
-# Locate the st.data_editor block and replace it with this version
+    # Locate the st.data_editor block and replace it with this version
     edited_df = st.data_editor(
         df_selected[[
             'Market ID', 'Chain', 'Loan Token', 'Collateral', 
             'Supply APY', 'Utilization', 'Total Supply (USD)', 
             'Total Borrow (USD)', 'Available Liquidity (USD)', 
-            'Existing Balance (USD)', 'Link To Market'
+            'Existing Balance (USD)', 'Link To Market', 'Force Exit'
         ]],
         column_config={
             "Supply APY": st.column_config.NumberColumn(format="percent"),
@@ -1059,7 +1075,8 @@ if not df_selected.empty:
             "Total Borrow (USD)": st.column_config.NumberColumn(format="dollar"),
             "Available Liquidity (USD)": st.column_config.NumberColumn(format="dollar"),
             "Existing Balance (USD)": st.column_config.NumberColumn(format="dollar", min_value=0.0),
-            "Link To Market": st.column_config.LinkColumn("Link To Market", display_text="Link")
+            "Link To Market": st.column_config.LinkColumn("Link To Market", display_text="Link"),
+            "Force Exit": st.column_config.CheckboxColumn("Force Exit?", help="Check to forcefully sell 100% of this position.", default=False)
         },
         disabled=[
             'Market ID', 'Chain', 'Loan Token', 'Collateral', 
@@ -1069,8 +1086,17 @@ if not df_selected.empty:
         width='stretch', 
         hide_index=True, 
         key="portfolio_editor",
-        on_change=sync_portfolio_edits
+        on_change=sync_portfolio_edits,
+        column_order=[
+            'Market ID', 'Chain', 'Loan Token', 'Collateral', 
+            'Supply APY', 'Utilization', 'Total Supply (USD)', 
+            'Total Borrow (USD)', 'Available Liquidity (USD)', 
+            'Existing Balance (USD)', 'Link To Market', 'Force Exit'
+        ]
     )
+    
+    # Capture Force Exit Selections from the edited dataframe
+    force_exit_map = dict(zip(edited_df['Market ID'], edited_df['Force Exit']))
 
     current_wealth = sum(st.session_state.balance_cache.get(m_id, 0.0) for m_id in df_selected['Market ID'])
     total_optimizable = current_wealth + new_cash
@@ -1081,8 +1107,18 @@ if not df_selected.empty:
     st.divider()
     metric_col1, metric_col2, metric_col3 = st.columns(3)
     metric_col1.metric("💰 Total Current Balance", f"${current_wealth:,.2f}")
-    metric_col2.metric("💵 Additional cash", f"${new_cash:,.2f}")
-    metric_col3.metric("📊 Total Optimizable", f"${total_optimizable:,.2f}")
+    
+    # Logic to display Withdrawal vs Addition
+    if new_cash < 0:
+        metric_col2.metric("📤 Withdrawing", f"-${abs(new_cash):,.2f}")
+    else:
+        metric_col2.metric("💵 Additional cash", f"${new_cash:,.2f}")
+        
+    metric_col3.metric("📊 Target Portfolio Size", f"${total_optimizable:,.2f}")
+    
+    if total_optimizable < 0:
+        st.error("⚠️ Withdrawal amount exceeds total current wealth! Please adjust.")
+        st.stop()
     
     st.divider()
 
@@ -1122,9 +1158,14 @@ if not df_selected.empty:
         # Add this line to clear previous history cache
         if 'hist_demand_df' in st.session_state:
             del st.session_state.hist_demand_df
+        
+        # Use existing selection logic for live details
         market_data_list = fetch_live_market_details(df_selected)
+        
+        # Inject Balance AND Force Exit info
         for m in market_data_list:
             m['existing_balance_usd'] = st.session_state.balance_cache.get(m['Market ID'], 0.0)
+            m['force_exit'] = force_exit_map.get(m['Market ID'], False)
 
         current_annual_interest = sum(m['existing_balance_usd'] * m['current_supply_apy'] for m in market_data_list)
         current_blended_apy = current_annual_interest / current_wealth if current_wealth > 0 else 0.0
@@ -1890,7 +1931,7 @@ if not df_selected.empty:
             
 # --- LI.FI ANALYSIS SECTION ---
             st.markdown("---")
-            st.markdown("### 🕵️‍♀️ Bridging Cost Breakeven")
+            st.markdown("### 🕵️‍♀️ Briding Cost Breakeven")
             st.caption("Determines if Bridging/Swapping is worth it. Aggregates moves by route. Simulates execution to find actual costs and break-even time. Note that this is just an estimate and Jumper may give different values")
             
             # Filter for Swaps/Bridges only (OpCode 2 or 3)
