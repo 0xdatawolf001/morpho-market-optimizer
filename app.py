@@ -1857,9 +1857,11 @@ if not df_selected.empty:
                     "From": src['name'],
                     "From Market ID": src.get('id', 'N/A')[:7],
                     "From (Chain)": src['chain'],
+                    "From (Token)": src['token'],  # <--- ADD THIS LINE
                     "To": dst['name'],
                     "To Market ID": dst.get('id', 'N/A')[:7],
                     "To (Chain)": dst['chain'],
+                    "To (Token)": dst['token'],    # <--- ADD THIS LINE
                     "Amount to move ($)": amount_to_move,
                     "Remaining Funds In Source ($)": src['running_balance'],
                     "Operation Type": op_type,
@@ -1890,6 +1892,7 @@ if not df_selected.empty:
                     "Ordering": ordering_counter,
                     "From": src['name'],
                     "From (Chain)": src['chain'],
+                    "From (Token)": src['token'],
                     "To": "Wallet (Unallocated)",
                     "To (Chain)": "Wallet",
                     "Amount to move ($)": src['available'],
@@ -1931,7 +1934,7 @@ if not df_selected.empty:
             
 # --- LI.FI ANALYSIS SECTION ---
             st.markdown("---")
-            st.markdown("### 🕵️‍♀️ Briding Cost Breakeven")
+            st.markdown("### 🕵️‍♀️ Bridging Cost Breakeven")
             st.caption("Determines if Bridging/Swapping is worth it. Aggregates moves by route. Simulates execution to find actual costs and break-even time. Note that this is just an estimate and Jumper may give different values")
             
             # Filter for Swaps/Bridges only (OpCode 2 or 3)
