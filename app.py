@@ -435,13 +435,14 @@ def fetch_user_positions(user_address):
 def fetch_historical_flows(market_ids_and_chains):
     """
     Fetches 30-day history for supplyShares and borrowShares.
-    Calculates a growth index starting at 1.0 for demand trends.
+    Calculates a Balanced Demand Index using the Geometric Mean: sqrt(Supply * Borrow).
+    This penalizes one-sided markets and rewards synergy between lenders and borrowers.
     """
     now = datetime.now(timezone.utc)
     start_time = int((now - timedelta(days=30)).timestamp())
     
     historical_data = []
-    hist_bar = st.progress(0, text="Analyzing 30-day demand trends...")
+    hist_bar = st.progress(0, text="Analyzing 30-day balanced demand trends...")
     
     for idx, m in enumerate(market_ids_and_chains):
         query = """
@@ -471,34 +472,26 @@ def fetch_historical_flows(market_ids_and_chains):
                 df_bor = pd.DataFrame(hist['borrowShares'])
                 
                 if not df_sup.empty and not df_bor.empty:
-                    # Merge supply and borrow shares
                     df_merged = pd.merge(df_sup, df_bor, on='x', suffixes=('_sup', '_bor'))
-                    
-                    # Convert to numeric
                     df_merged['y_sup'] = df_merged['y_sup'].astype(float)
                     df_merged['y_bor'] = df_merged['y_bor'].astype(float)
                     
-                    # Calculate Combined Total Shares
-                    df_merged['total_shares'] = df_merged['y_sup'] + df_merged['y_bor']
-                    
-                    # --- FIX: ENSURE ASCENDING SORT FOR INDEX BASELINE ---
+                    # MATH UPDATE: Geometric Mean ensures both Supply and Borrow must exist to score
+                    df_merged['balanced_activity'] = np.sqrt(df_merged['y_sup'] * df_merged['y_bor'])
                     df_merged = df_merged.sort_values('x', ascending=True)
                     
-                    # Calculate Growth Index relative to the START of the window
-                    initial_total = df_merged['total_shares'].iloc[0]
-                    
-                    if initial_total > 0:
-                        df_merged['indexed_demand'] = df_merged['total_shares'] / initial_total
+                    # Find first day with actual activity to avoid 0-division baseline
+                    active_days = df_merged[df_merged['balanced_activity'] > 0]
+                    if not active_days.empty:
+                        initial_activity = active_days['balanced_activity'].iloc[0]
+                        df_merged['indexed_demand'] = df_merged['balanced_activity'] / initial_activity
                     else:
-                        # Safety: If market starts at 0, index stays at 1.0 until first movement
                         df_merged['indexed_demand'] = 1.0
                         
                     short_id = m['uniqueKey'][0:6]
                     unique_label = f"{m['name']} [{short_id}]"
-                    
                     df_merged['Market'] = unique_label
                     df_merged['date'] = pd.to_datetime(df_merged['x'], unit='s')
-                    
                     historical_data.append(df_merged[['date', 'Market', 'indexed_demand']])
         except Exception as e:
             st.error(f"Error fetching history for {m['uniqueKey']}: {e}")
@@ -506,10 +499,7 @@ def fetch_historical_flows(market_ids_and_chains):
         hist_bar.progress((idx + 1) / len(market_ids_and_chains))
         
     hist_bar.empty()
-    
-    if historical_data:
-        return pd.concat(historical_data)
-    return pd.DataFrame()
+    return pd.concat(historical_data) if historical_data else pd.DataFrame()
 
 # ==========================================
 # 3. OPTIMIZER
@@ -1357,8 +1347,8 @@ if not df_selected.empty:
         # --- FULL WIDTH: DEMAND TRENDS CHART ---
         d_col_header, d_col_filter = st.columns([2, 1])
         with d_col_header:
-            st.subheader("📈 30-Day Demand Trend (Indexed)")
-            st.caption("Growth of Supply + Borrow shares relative to start of period (Baseline = 1.0).")
+            st.subheader("📈 30-Day Balanced Demand Trend")
+            st.caption("Growth of the square root of Supply x Borrow relative to start of period. Rewards balanced market synergy and penalizes ghost/diluted pools.")
         
         # 1. Prepare list for fetching
         targets_for_history = []
