@@ -1890,7 +1890,7 @@ if not df_selected.empty:
             
 # --- LI.FI ANALYSIS SECTION ---
             st.markdown("---")
-            st.markdown("### 🕵️‍♀️ Briding Cost Breakeven")
+            st.markdown("### 🕵️‍♀️ Bridging Cost Breakeven")
             st.caption("Determines if Bridging/Swapping is worth it. Aggregates moves by route. Simulates execution to find actual costs and break-even time. Note that this is just an estimate and Jumper may give different values")
             
             # Filter for Swaps/Bridges only (OpCode 2 or 3)
