@@ -1336,7 +1336,7 @@ if not df_selected.empty:
             
             # Action State Logic
             if net_move > 0.01:
-                action = "🟢 DEPOSIT"
+                action = "🟢 DEPOSIT/TRANSFER"
             elif net_move < -0.01:
                 if actual_withdrawable <= 0.01:
                     action = "⚠️ STUCK"
@@ -1681,24 +1681,97 @@ if not df_selected.empty:
             st.dataframe(stuck_df[["Market", "Chain", "Stuck Funds ($)"]].style.format({"Stuck Funds ($)": "${:,.2f}"}), width='stretch', hide_index=True)
 
         if transfer_steps:
-            st.markdown("#### Market Rebalance Steps")
+            st.markdown("### ⚡ Execution Plan")
+            st.caption("Grouped by Source Market. Open a section to see where to distribute the funds.")
+
             df_actions = pd.DataFrame(transfer_steps)
             
-            def highlight_op(val):
-                if "1." in val: return 'color: #00E676; font-weight: bold;' # Brighter Green
-                if "2." in val: return 'color: #01579b; font-weight: bold;' # Blue
-                if "3." in val: return 'color: #b71c1c; font-weight: bold;' # Red
-                return ''
+            # Group by unique Source Market
+            grouped = df_actions.groupby(['From', 'From (Chain)', 'From (Token)'])
 
-            st.dataframe(
-                df_actions.style.format({
-                    "Amount to move ($)": "${:,.2f}",
-                    "Remaining Funds In Source ($)": "${:,.2f}"
-                }).applymap(highlight_op, subset=['Operation Type']), 
-                column_order=["Ordering", "Operation Type", "From", "From (Chain)", "To", "To (Chain)", "Amount to move ($)", "Remaining Funds In Source ($)"],
-                width='stretch', 
-                hide_index=True
-            )
+            # Counter for Step Numbers
+            step_count = 1
+
+            for (src_name, src_chain, src_token), group in grouped:
+                
+                # 1. Calculate Summary for this Source
+                total_withdraw = group['Amount to move ($)'].sum()
+                
+                # 2. Determine if this is New Cash or an existing Market
+                if src_name == "New Capital":
+                    header_label = f"Step {step_count}: 💵 Use New Cash"
+                    header_amount = f":green[${total_withdraw:,.2f}]"
+                else:
+                    header_label = f"Step {step_count}: 📤 Withdraw from {src_name} ({src_chain})"
+                    header_amount = f":red[${total_withdraw:,.2f}]"
+
+                # 3. Render as an Expander (Compact)
+                with st.expander(f"{header_label} — Total: {header_amount}", expanded=True):
+                    
+                    # Prepare a clean sub-dataframe for display
+                    # We create a 'Description' column to combine Action + Chain + Target for readability
+                    display_rows = []
+                    for _, row in group.sort_values('OpCode').iterrows():
+                        op_code = row['OpCode']
+                        dest = row['To']
+                        dest_chain = row['To (Chain)']
+                        
+                        if op_code == 1: # Rebalance (Same Chain)
+                            action = "🟢 Deposit"
+                            details = f"{dest}"
+                        elif op_code == 2: # Swap (Same Chain)
+                            action = "🔵 Swap & Deposit"
+                            details = f"{dest}"
+                        elif op_code == 3: # Bridge
+                            action = "🔴 Bridge"
+                            details = f"to {dest_chain} ➡️ {dest}"
+                        else:
+                            action = "⚪ Hold"
+                            details = "Keep in Wallet"
+
+                        display_rows.append({
+                            "Action": action,
+                            "Destination": details,
+                            "Amount": row['Amount to move ($)']
+                        })
+                    
+                    df_display = pd.DataFrame(display_rows)
+                    
+                    # Render tight table
+                    st.dataframe(
+                        df_display,
+                        column_config={
+                            "Amount": st.column_config.NumberColumn(format="$%.2f"),
+                        },
+                        hide_index=True,
+                        use_container_width=True
+                    )
+                
+                step_count += 1
+
+            # # Raw Data option at the bottom
+            # with st.expander("🔍 View Raw Data Table"):
+            #     st.dataframe(df_actions, use_container_width=True)
+                            
+            #     st.markdown("---") # Separator between Source Markets
+
+            # Raw Table in Expander (for auditing)
+            with st.expander("View Raw Transaction Table"):
+                def highlight_op(val):
+                    if "1." in val: return 'color: #00E676; font-weight: bold;'
+                    if "2." in val: return 'color: #01579b; font-weight: bold;'
+                    if "3." in val: return 'color: #b71c1c; font-weight: bold;'
+                    return ''
+
+                st.dataframe(
+                    df_actions.style.format({
+                        "Amount to move ($)": "${:,.2f}",
+                        "Remaining Funds In Source ($)": "${:,.2f}"
+                    }).applymap(highlight_op, subset=['Operation Type']), 
+                    column_order=["Ordering", "Operation Type", "From", "From (Chain)", "To", "To (Chain)", "Amount to move ($)", "Remaining Funds In Source ($)"],
+                    width='stretch', 
+                    hide_index=True
+                )
             
 # --- LI.FI ANALYSIS SECTION ---
             st.markdown("---")
