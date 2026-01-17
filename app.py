@@ -1013,7 +1013,6 @@ with col_param:
     max_port_alloc = st.number_input(
         "Max Portfolio Allocation %",
         value=100.0,
-
         help="Safety limit: No single market can exceed this % of the total portfolio."
     )
 
@@ -2176,13 +2175,13 @@ if not df_selected.empty:
                         asset_breakeven_str = "N/A"
                         port_breakeven_str = "N/A"
                         
+                        total_cost = 0.0
                         cost_display = "Quote Failed"
                         gas_display = fee_display = slip_display = "$0.00"
                         amt_in_display = f"${batch_total_usd:,.2f}" # Default to theoretical if fail
                         amt_out_display = "$0.00"
                         slippage_used_display = "Failed"
                         execution_path_display = "No Route Found"
-                        
                         signal = "⚪ Unknown"
 
                         if quote_res['success']:
@@ -2196,35 +2195,33 @@ if not df_selected.empty:
                             amt_in_display = f"${quote_res['amount_in']:,.2f}"
                             amt_out_display = f"${quote_res['amount_out']:,.2f}"
                             
-                            # Show Slippage Used as Percentage
                             slippage_used_display = f"{quote_res['slippage_used']*100:.2f}%"
                             execution_path_display = quote_res['execution_path']
 
-                        if asset_hourly_yield_usd > 0:
-                            hours_to_recover = total_cost / asset_hourly_yield_usd
-                            
-                            if hours_to_recover < 1:
-                                asset_breakeven_str = "Instant"
-                                signal = "🟢 Good"
-                            elif hours_to_recover < 24:
-                                asset_breakeven_str = f"{hours_to_recover:.1f} hrs"
-                                signal = "🟢 Good"
-                            elif hours_to_recover < 168:
-                                asset_breakeven_str = f"{hours_to_recover/24:.1f} days"
-                                signal = "🟡 Okay"
+                            # --- A. Asset-Specific Break-even ---
+                            if asset_hourly_yield_usd > 0:
+                                hours_to_recover = total_cost / asset_hourly_yield_usd
+                                if hours_to_recover < 1:
+                                    asset_breakeven_str = "Instant"
+                                    signal = "🟢 Good"
+                                elif hours_to_recover < 24:
+                                    asset_breakeven_str = f"{hours_to_recover:.1f} hrs"
+                                    signal = "🟢 Good"
+                                elif hours_to_recover < 168:
+                                    asset_breakeven_str = f"{hours_to_recover/24:.1f} days"
+                                    signal = "🟡 Okay"
+                                else:
+                                    asset_breakeven_str = f"{hours_to_recover/24:.0f} days"
+                                    signal = "🔴 Poor"
                             else:
-                                asset_breakeven_str = f"{hours_to_recover/24:.0f} days"
-                                signal = "🔴 Poor"
-                        else:
-                            # If total_cost is 0 or negative and yield is 0, still technically instant recovery
-                            if total_cost <= 0:
-                                asset_breakeven_str = "Instant"
-                                signal = "🟢 Good"
-                            else:
-                                asset_breakeven_str = "Never"
-                                signal = "🔴 Bad"
+                                if total_cost <= 0:
+                                    asset_breakeven_str = "Instant"
+                                    signal = "🟢 Good"
+                                else:
+                                    asset_breakeven_str = "Never"
+                                    signal = "🔴 Bad"
 
-                            # --- B. Portfolio Break-even ---
+                            # --- B. Portfolio Break-even (Independent of Asset Check) ---
                             if portfolio_hourly_earnings > 0:
                                 port_hours = total_cost / portfolio_hourly_earnings
                                 if port_hours < 1:
