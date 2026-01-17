@@ -2207,18 +2207,26 @@ if not df_selected.empty:
                             slippage_used_display = f"{quote_res['slippage_used']*100:.2f}%"
                             execution_path_display = quote_res['execution_path']
 
-                            # --- A. Asset-Chain Break-even ---
-                            if asset_hourly_yield_usd > 0:
-                                hours_to_recover = total_cost / asset_hourly_yield_usd
-                                if hours_to_recover < 24:
-                                    asset_breakeven_str = f"{hours_to_recover:.1f} hrs"
-                                    signal = "🟢 Good"
-                                elif hours_to_recover < 168:
-                                    asset_breakeven_str = f"{hours_to_recover/24:.1f} days"
-                                    signal = "🟡 Okay"
-                                else:
-                                    asset_breakeven_str = f"{hours_to_recover/24:.0f} days"
-                                    signal = "🔴 Poor"
+                        if asset_hourly_yield_usd > 0:
+                            hours_to_recover = total_cost / asset_hourly_yield_usd
+                            
+                            if hours_to_recover < 1:
+                                asset_breakeven_str = "Instant"
+                                signal = "🟢 Good"
+                            elif hours_to_recover < 24:
+                                asset_breakeven_str = f"{hours_to_recover:.1f} hrs"
+                                signal = "🟢 Good"
+                            elif hours_to_recover < 168:
+                                asset_breakeven_str = f"{hours_to_recover/24:.1f} days"
+                                signal = "🟡 Okay"
+                            else:
+                                asset_breakeven_str = f"{hours_to_recover/24:.0f} days"
+                                signal = "🔴 Poor"
+                        else:
+                            # If total_cost is 0 or negative and yield is 0, still technically instant recovery
+                            if total_cost <= 0:
+                                asset_breakeven_str = "Instant"
+                                signal = "🟢 Good"
                             else:
                                 asset_breakeven_str = "Never"
                                 signal = "🔴 Bad"
@@ -2269,8 +2277,8 @@ if not df_selected.empty:
                                 ),
                                 "Slippage Used": st.column_config.TextColumn(help="The slippage tolerance required to get this quote"),
                                 "Jumper Link": st.column_config.LinkColumn("Execute Batch", display_text="Open Jumper"),
-                                "Asset B/E": st.column_config.TextColumn(help="Time for this specific position's yield to pay off the transfer cost."),
-                                "Portfolio B/E": st.column_config.TextColumn(help="Time for your TOTAL portfolio yield to pay off this specific transfer cost.")
+                                "Asset B/E": st.column_config.TextColumn(help="Time for this specific position's yield to pay off the transfer cost. 'Instant' indicates recovery in less than 1 hour."),
+                                "Portfolio B/E": st.column_config.TextColumn(help="Time for your TOTAL portfolio yield to pay off this specific transfer cost. 'Instant' indicates recovery in less than 1 hour.")
                             },
                             hide_index=True,
                             use_container_width=True
