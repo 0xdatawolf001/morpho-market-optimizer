@@ -27,6 +27,7 @@ RETRY_BACKOFF = 2 # Seconds
 # Chart Performance Constants (NEW)
 MAX_SCATTER_PLOT_POINTS = 5000 # Max points for the Efficiency Frontier plot
 MAX_LINE_PLOT_POINTS_PER_STRATEGY = 1000 # Max points per strategy for the Solver Convergence plot
+DEMAND_TREND_CHART_HEIGHT = 800 # Increased for better vertical visibility
 
 # For text box
 # Separator Constant
@@ -1588,10 +1589,12 @@ if not df_selected.empty:
                         opacity=alt.condition(hover, alt.value(0.3), alt.value(0))
                     ).transform_filter(hover)
 
+                    # Updated to use global height constant
                     final_chart = alt.layer(
                         lines, selectors, points, rules
-                    ).properties(height=450).interactive()
+                    ).properties(height=DEMAND_TREND_CHART_HEIGHT).interactive()
                     
+                    print(f"[UI] Rendering Demand Trend Chart with height: {DEMAND_TREND_CHART_HEIGHT}px")
                     st.altair_chart(final_chart, use_container_width=True)
                 else:
                     st.info(f"No markets found matching filter: {filter_mode}")
