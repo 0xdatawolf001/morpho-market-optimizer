@@ -506,12 +506,11 @@ def fetch_historical_flows(market_ids_and_chains):
 # ==========================================
 
 class RebalanceOptimizer:
-    def __init__(self, total_budget, market_list, max_dominance_pct=100.0, max_port_alloc_pct=100.0, allow_overflow=False):
+    def __init__(self, total_budget, market_list, max_dominance_pct=100.0, max_port_alloc_pct=100.0):
         self.total_budget = total_budget 
         self.markets = market_list
         self.max_dominance_ratio = max_dominance_pct / 100.0 
         self.max_port_alloc_ratio = max_port_alloc_pct / 100.0
-        self.allow_overflow = allow_overflow 
         
         self.yield_trace = []    
         self.frontier_trace = [] 
@@ -519,7 +518,7 @@ class RebalanceOptimizer:
         self.whale_trace = []
         self.capacity_warning = None 
         
-        self.all_attempts = []   
+        self.all_attempts = []
 
     def simulate_apy(self, market, user_new_alloc_usd):
         # 1. Get Market Constants
@@ -557,8 +556,9 @@ class RebalanceOptimizer:
         x = np.maximum(x, 0)
         sum_x = np.sum(x)
         if sum_x == 0: return x 
-        # Only normalize if we are not strictly capped by safety constraints
-        if not self.allow_overflow and sum_x < (self.total_budget - 0.01):
+        # If the optimizer couldn't reach the full budget due to safety bounds,
+        # we do not scale up the result, as that would violate those hard constraints.
+        if sum_x < (self.total_budget - 0.01):
             return x
         return x * (self.total_budget / sum_x)
 
@@ -634,7 +634,6 @@ class RebalanceOptimizer:
 
         for m in self.markets:
             # --- FORCE EXIT LOGIC ---
-            # If user marked this market for Force Exit, strict bound is 0.0
             if m.get('force_exit', False):
                 standard_bounds.append((0.0, 0.0))
                 whale_bounds.append((0.0, 0.0))
@@ -660,23 +659,14 @@ class RebalanceOptimizer:
             whale_bounds.append((0.0, min(self.total_budget, port_cap_usd, liq_shield_cap)))
 
         # --- Capacity Checks & Warnings ---
-        total_standard_cap = sum([b[1] for b in standard_bounds])
         total_whale_cap = sum([b[1] for b in whale_bounds])
         
         if total_whale_cap < (self.total_budget):
-            if self.allow_overflow:
-                self.capacity_warning = (
-                    f"⚠️ **Safety Limits Ignored:** Total Budget (\${self.total_budget:,.0f}) exceeds your safety caps. "
-                    "Optimizer reverted to standard bounds to ensure full investment."
-                )
-                whale_bounds = [(0.0, self.total_budget) if b[1] > 0 else (0.0, 0.0) for b in standard_bounds]
-                # Note: We keep Force Exits (0.0) even in overflow mode
-            else:
-                self.capacity_warning = (
-                    f"⚠️ **Budget Limited by Safety Caps:** Your total budget (\${self.total_budget:,.0f}) exceeds the "
-                    f"combined capacity of your chosen markets (\${total_whale_cap:,.0f}) under current safety rules. "
-                    "Some cash will remain unallocated."
-                )
+            self.capacity_warning = (
+                f"⚠️ **Budget Limited by Safety Caps:** Your total budget (\${self.total_budget:,.0f}) exceeds the "
+                f"combined capacity of your chosen markets (\${total_whale_cap:,.0f}) under current safety rules. "
+                "Some cash will remain unallocated."
+            )
 
         x0 = np.full(n, self.total_budget / n)
         constraints = ({'type': 'eq', 'fun': lambda x: np.sum(x) - self.total_budget})
@@ -1024,12 +1014,6 @@ with col_param:
         step=50.0
     )
 
-    allow_break = st.checkbox(
-        "Allow Safety Cap Overflow?",
-        value=False,
-        help="If checked, the optimizer will ignore both Whale Shield and Portfolio Caps to ensure all money is invested. Useful if your safety rules are too strict for your budget size."
-    )
-
 if not df_selected.empty:
 
     # 1. Ensure current state is mapped to the dataframe
@@ -1170,13 +1154,12 @@ if not df_selected.empty:
         current_annual_interest = sum(m['existing_balance_usd'] * m['current_supply_apy'] for m in market_data_list)
         current_blended_apy = current_annual_interest / current_wealth if current_wealth > 0 else 0.0
 
-        # Pass max_dominance, max_port_alloc, and allow_overflow to Optimizer
+    # Pass max_dominance and max_port_alloc to Optimizer
         opt = RebalanceOptimizer(
             total_optimizable, 
             market_data_list, 
             max_dominance, 
-            max_port_alloc, 
-            allow_break
+            max_port_alloc
         )
         
         # Unpack 4 results
