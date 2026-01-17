@@ -145,29 +145,28 @@ def to_atomic_units(amount_adjusted: float, decimals: int) -> str:
     return str(int(round(amount_adjusted * (10**decimals))))
 
 def get_lifi_quote(from_chain, to_chain, from_token, to_token, amount_atomic, user_address, user_slippage_decimal):
-    """
-    Calls LI.FI /v1/advanced/routes API to match Jumper.exchange efficiency.
-    Includes timing strategies and multi-step route options.
-    """
     url = "https://li.quest/v1/advanced/routes"
     
-    # Slippage Ladder
+    # Construct the Ladder
     ladder = [user_slippage_decimal]
+    # Standard steps: 0.05%, 0.1%, 0.5%, 1%, 5%, 10%
     standard_tiers = [0.0005, 0.001, 0.005, 0.01, 0.05, 0.1]
     
     for tier in standard_tiers:
         if tier > user_slippage_decimal:
             ladder.append(tier)
             
+    # Unique, sorted values starting with the user's lowest preference
     ladder = sorted(list(set(ladder)))
-    if ladder[0] != user_slippage_decimal:
+    if ladder[0] != user_slippage_decimal and user_slippage_decimal in ladder:
         ladder.remove(user_slippage_decimal)
         ladder.insert(0, user_slippage_decimal)
 
     last_error = None
+    print(f"[LI.FI] Starting quote search for {from_token} -> {to_token} with slippage ladder: {ladder}")
 
-    for slippage_try in ladder:
-        # Construct Payload for /advanced/routes
+    # OUTER LOOP: The Slippage Ladder
+    for slippage_tier in ladder:
         payload = {
             "fromChainId": int(from_chain),
             "fromAmount": amount_atomic,
@@ -175,16 +174,15 @@ def get_lifi_quote(from_chain, to_chain, from_token, to_token, amount_atomic, us
             "toChainId": int(to_chain),
             "toTokenAddress": to_token,
             "options": {
-                "slippage": slippage_try,
-                "order": "CHEAPEST", # Matches Jumper defaults for best rate
-                "allowSwitchChain": True, # Allows multi-step bridge + swap
-                "allowDestinationCall": True, # Essential for efficient solving
-                # "fee": 0.0, # Explicitly 0 ensures we see the raw cost without API fees
+                "slippage": slippage_tier,
+                "order": "CHEAPEST",
+                "allowSwitchChain": True,
+                "allowDestinationCall": True,
                 "timing": {
                     "routeTimingStrategies": [
                         {
                             "strategy": "minWaitTime",
-                            "minWaitTimeMs": 1500, # Wait 1.5s to gather best quotes
+                            "minWaitTimeMs": 1500,
                             "startingExpectedResults": 6,
                             "reduceEveryMs": 500
                         }
@@ -193,88 +191,59 @@ def get_lifi_quote(from_chain, to_chain, from_token, to_token, amount_atomic, us
             }
         }
 
-        # Add fromAddress if valid (helps with balance checks/gas estimation)
         if user_address and len(user_address) > 10:
             payload["fromAddress"] = user_address
 
-        headers = {
-            "Content-Type": "application/json",
-            "accept": "application/json"
-        }
-        
+        # INNER LOOP: Retries for Network/Rate Limits
         for attempt in range(MAX_RETRIES):
             try:
-                response = requests.post(url, json=payload, headers=headers, timeout=15)
+                response = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=15)
                 
                 if response.status_code == 200:
                     data = response.json()
                     routes = data.get('routes', [])
                     
                     if not routes:
-                        last_error = "No routes found."
-                        break # Try next slippage tier or exit
+                        last_error = f"No routes found for tier {slippage_tier*100}%"
+                        break 
                     
-                    # We selected "CHEAPEST" in options, so routes[0] is the best one
                     best_route = routes[0]
                     
-                    # 1. Amounts
+                    # Extraction
                     amount_in_usd = float(best_route.get('fromAmountUSD', 0))
                     amount_out_usd = float(best_route.get('toAmountUSD', 0))
-                    
-                    # 2. Costs
-                    # gasCostUSD is provided at the top level of the route object
                     gas_usd = float(best_route.get('gasCostUSD', 0))
                     
-                    # Fee costs are nested in steps. We sum them up for display.
                     fee_usd = 0.0
-                    steps = best_route.get('steps', [])
                     path_steps = []
-                    
-                    for step in steps:
-                        # Sum Fees
+                    for step in best_route.get('steps', []):
                         step_fees = step.get('estimate', {}).get('feeCosts', [])
                         if step_fees:
                             fee_usd += sum([float(f.get('amountUSD', 0)) for f in step_fees])
-                        
-                        # Build Execution Path String
                         tool_name = step.get('toolDetails', {}).get('name') or step.get('tool')
-                        if tool_name:
-                            path_steps.append(tool_name)
+                        if tool_name: path_steps.append(tool_name)
 
-                    # 3. Total Economic Cost
-                    # Value Loss (Slippage + Token Fees) + Gas + Explicit Fees (if any separate)
-                    # Note: amount_out_usd usually already accounts for token-deducted fees.
-                    slippage_loss = max(0.0, amount_in_usd - amount_out_usd)
-                    
-                    # Total Cost for ROI calc = Gas + Value Loss (which includes slippage & fees taken from token)
-                    # We add fee_usd only if it wasn't already deducted from toAmount (usually feeCosts explains the diff)
-                    # To be safe for ROI: Input Value - Output Value + Gas Paid is the user's net cost.
-                    total_cost = (amount_in_usd - amount_out_usd) + gas_usd
-
-                    execution_path = " ➡️ ".join(path_steps) if path_steps else "Optimized Route"
-                    
                     return {
                         "success": True,
-                        "total_cost": total_cost,
+                        "total_cost": (amount_in_usd - amount_out_usd) + gas_usd,
                         "gas": gas_usd,
-                        "fees": fee_usd, # For display purposes
-                        "slippage_cost": slippage_loss,
+                        "fees": fee_usd,
+                        "swap_and_impact_cost": max(0.0, amount_in_usd - amount_out_usd),
                         "amount_in": amount_in_usd,
                         "amount_out": amount_out_usd,
-                        "slippage_used": slippage_try,
-                        "execution_path": execution_path
+                        "ladder_tier_used": slippage_tier,
+                        "execution_path": " ➡️ ".join(path_steps) if path_steps else "Optimized Route"
                     }
                 
                 elif response.status_code == 429:
                     time.sleep(RETRY_BACKOFF * (attempt + 1))
                     continue
-                
                 else:
-                    last_error = f"API Error {response.status_code}: {response.text}"
+                    last_error = f"API Error {response.status_code}"
                     break 
                     
             except Exception as e:
-                print(f"LI.FI Exception: {e}")
+                last_error = str(e)
                 time.sleep(RETRY_BACKOFF)
     
     return {"success": False, "error": last_error}
@@ -2107,11 +2076,8 @@ if not df_selected.empty:
                     # User inputs Percentage (e.g. 0.5), we convert to decimal (0.005) later
                     user_slippage_pct = st.number_input(
                         "Target Slippage Tolerance (%)", 
-                        min_value=0.0001, 
-                        max_value=5.0, 
                         value=0.0001, 
-                        step=0.0001, 
-                        format="%.4f"
+                        format="%.6f"
                     )
                     
                 with c_an2:
@@ -2120,148 +2086,88 @@ if not df_selected.empty:
                     run_analysis = st.button("Analyze Gas, Slippage & ROI via LI.FI", type="primary")
 
                 if run_analysis:
-                    # 1. Batching Logic: Group by Route
-                    batches = {}
-                    for move in complex_moves:
-                        # Define unique route key
-                        key = (move['src_chain_id'], move['dst_chain_id'], move['src_token'], move['dst_token'])
-                        
-                        if key not in batches:
-                            batches[key] = {
-                                "src_chain_name": move['From (Chain)'],
-                                "dst_chain_name": move['To (Chain)'],
-                                "src_token_symbol": move['From (Token)'],
-                                "dst_token_symbol": move['To (Token)'],
-                                "total_usd": 0.0,
-                                "total_token_amount": 0.0,
-                                "weighted_yield_sum": 0.0,
-                                "decimals": move['decimals'],
-                                "price": move['price']
-                            }
-                        
-                        batches[key]["total_usd"] += move['Amount to move ($)']
-                        # Decimal adjusted token amount
-                        token_amt = move['Amount to move ($)'] / move['price'] if move['price'] > 0 else 0
-                        batches[key]["total_token_amount"] += token_amt
-                        # Yield contribution for weighted APY
-                        batches[key]["weighted_yield_sum"] += (move['Amount to move ($)'] * move['dst_apy'])
-
                     analysis_results = []
-                    batch_list = list(batches.values())
-                    prog_bar = st.progress(0, text="Requesting batched quotes from LI.FI...")
-                    dummy_wallet = user_wallet if (user_wallet and len(user_wallet) > 10) else "0x0000000000000000000000000000000000000000"
+                    prog_bar = st.progress(0, text=f"Analyzing {len(complex_moves)} individual moves via LI.FI...")
                     
-                    # Portfolio level earnings rate (per hour)
-                    portfolio_hourly_earnings = new_annual_interest / 8760 if new_annual_interest > 0 else 0
+                    dummy_wallet = user_wallet if (user_wallet and len(user_wallet) > 10) else "0x0000000000000000000000000000000000000000"
 
-                    for i, batch in enumerate(batch_list):
-                        # 2. Convert to Atomic Units for LI.FI
-                        atomic_amt = to_atomic_units(batch['total_token_amount'], batch['decimals'])
+                    for i, move in enumerate(complex_moves):
+                        token_amt = move['Amount to move ($)'] / move['price'] if move['price'] > 0 else 0
+                        atomic_amt = to_atomic_units(token_amt, move['decimals'])
                         
-                        # Find the key keys for the API call
-                        route_key = [k for k, v in batches.items() if v == batch][0]
-                        
-                        # 3. Call API with Smart Slippage
                         quote_res = get_lifi_quote(
-                            route_key[0], # src_chain_id
-                            route_key[1], # dst_chain_id
-                            route_key[2], # src_token (address)
-                            route_key[3], # dst_token (address)
-                            atomic_amt,   # ATOMIC UNITS STRING
+                            move['src_chain_id'],
+                            move['dst_chain_id'],
+                            move['src_token'],
+                            move['dst_token'],
+                            atomic_amt,
                             dummy_wallet,
                             user_slippage_decimal=(user_slippage_pct / 100.0)
                         )
                         
-                        # 4. ROI Logic using Batched Totals
-                        batch_total_usd = batch['total_usd']
-                        batch_weighted_apy = batch['weighted_yield_sum'] / batch_total_usd if batch_total_usd > 0 else 0
-                        
-                        # New: Portfolio APY Contribution (Multiplied by 100 for formatter)
-                        portfolio_apy_contribution_pct = (batch['weighted_yield_sum'] / total_optimizable * 100) if total_optimizable > 0 else 0.0
-
-                        # Asset-Chain level earnings
-                        asset_hourly_yield_usd = (batch_total_usd * batch_weighted_apy) / 8760
+                        # ROI Logic
+                        move_usd = move['Amount to move ($)']
+                        move_apy = move['dst_apy']
+                        annual_interest_gain = move_usd * move_apy
+                        portfolio_apy_contribution_pct = (annual_interest_gain / total_optimizable * 100) if total_optimizable > 0 else 0.0
                         
                         asset_breakeven_str = "N/A"
                         port_breakeven_str = "N/A"
-                        
-                        total_cost = 0.0
+                        net_roi_usd = 0.0
                         cost_display = "Quote Failed"
                         gas_display = fee_display = slip_display = "$0.00"
-                        amt_in_display = f"${batch_total_usd:,.2f}" # Default to theoretical if fail
+                        amt_in_display = f"${move_usd:,.2f}"
                         amt_out_display = "$0.00"
-                        slippage_used_display = f"{quote_res['slippage_used']*100:.4f}%"
-                        execution_path_display = quote_res['execution_path']
+                        slippage_tolerance_display = "Failed"
                         execution_path_display = "No Route Found"
                         signal = "⚪ Unknown"
 
                         if quote_res['success']:
                             total_cost = quote_res['total_cost']
-                            cost_display = f"${total_cost:.2f}"
+                            net_roi_usd = annual_interest_gain - total_cost
                             
+                            cost_display = f"${total_cost:.2f}"
                             gas_display = f"${quote_res['gas']:.2f}"
                             fee_display = f"${quote_res['fees']:.2f}"
-                            slip_display = f"${quote_res['slippage_cost']:.2f}"
-                            
+                            slip_display = f"${quote_res['swap_and_impact_cost']:.2f}"
                             amt_in_display = f"${quote_res['amount_in']:,.2f}"
                             amt_out_display = f"${quote_res['amount_out']:,.2f}"
-                            
-                            slippage_used_display = f"{quote_res['slippage_used']*100:.2f}%"
+                            slippage_tolerance_display = f"{quote_res['ladder_tier_used']*100:.6f}%"
                             execution_path_display = quote_res['execution_path']
 
-                            # --- A. Asset-Specific Break-even ---
-                            if asset_hourly_yield_usd > 0:
-                                hours_to_recover = total_cost / asset_hourly_yield_usd
-                                if hours_to_recover < 1:
-                                    asset_breakeven_str = "Instant"
-                                    signal = "🟢 Good"
-                                elif hours_to_recover < 24:
-                                    asset_breakeven_str = f"{hours_to_recover:.1f} hrs"
-                                    signal = "🟢 Good"
-                                elif hours_to_recover < 168:
-                                    asset_breakeven_str = f"{hours_to_recover/24:.1f} days"
-                                    signal = "🟡 Okay"
-                                else:
-                                    asset_breakeven_str = f"{hours_to_recover/24:.0f} days"
-                                    signal = "🔴 Poor"
-                            else:
-                                if total_cost <= 0:
-                                    asset_breakeven_str = "Instant"
-                                    signal = "🟢 Good"
-                                else:
-                                    asset_breakeven_str = "Never"
-                                    signal = "🔴 Bad"
-
-                            # --- B. Portfolio Break-even (Independent of Asset Check) ---
-                            if portfolio_hourly_earnings > 0:
-                                port_hours = total_cost / portfolio_hourly_earnings
-                                if port_hours < 1:
-                                    port_breakeven_str = "Instant"
-                                elif port_hours < 24:
-                                    port_breakeven_str = f"{port_hours:.1f} hrs"
-                                else:
-                                    port_breakeven_str = f"{port_hours/24:.1f} days"
+                            # Asset Break-even
+                            asset_hourly_yield = annual_interest_gain / 8760
+                            if asset_hourly_yield > 0:
+                                hours = total_cost / asset_hourly_yield
+                                if hours < 1: asset_breakeven_str = "Instant"
+                                elif hours < 24: asset_breakeven_str = f"{hours:.1f} hrs"
+                                else: asset_breakeven_str = f"{hours/24:.1f} days"
                             
-                        # 5. Generate Jumper Link
-                        link = f"https://jumper.exchange/?fromChain={route_key[0]}&fromToken={route_key[2]}&toChain={route_key[1]}&toToken={route_key[3]}&fromAmount={batch['total_token_amount']}"
+                            # Signal Logic
+                            if net_roi_usd < 0: signal = "🔴 Negative ROI"
+                            elif hours < 24: signal = "🟢 Strong"
+                            elif hours < 168: signal = "🟡 Slow"
+                            else: signal = "🟠 Marginal"
+                            
+                        link = f"https://jumper.exchange/?fromChain={move['src_chain_id']}&fromToken={move['src_token']}&toChain={move['dst_chain_id']}&toToken={move['dst_token']}&fromAmount={token_amt}"
                         
                         analysis_results.append({
                             "Signal": signal,
-                            "Route": f"{batch['src_token_symbol']} ({batch['src_chain_name']}) ➡️ {batch['dst_token_symbol']} ({batch['dst_chain_name']})",
+                            "From Market": f"{move['From']} ({move['From (Chain)']})",
+                            "To Market": f"{move['To']} ({move['To (Chain)']})",
                             "Execution Path": execution_path_display,
                             "Amount In": amt_in_display,
                             "Simulated Out": amt_out_display,
-                            "Portfolio APY Contribution": portfolio_apy_contribution_pct,
+                            "Net ROI (1yr $)": net_roi_usd,
                             "Total Cost": cost_display,
                             "Gas": gas_display,
                             "Fees": fee_display,
-                            "Slippage ($)": slip_display,
-                            "Slippage Used": slippage_used_display,
+                            "Swap & Impact Cost ($)": slip_display,
+                            "Slippage Tolerance": slippage_tolerance_display,
                             "Asset B/E": asset_breakeven_str,
-                            "Portfolio B/E": port_breakeven_str,
                             "Jumper Link": link
                         })
-                        prog_bar.progress((i + 1) / len(batch_list))
+                        prog_bar.progress((i + 1) / len(complex_moves))
                     
                     prog_bar.empty()
                     
@@ -2269,17 +2175,19 @@ if not df_selected.empty:
                         st.dataframe(
                             pd.DataFrame(analysis_results),
                             column_config={
-                                "Execution Path": st.column_config.TextColumn(help="The sequence of DEXs and Bridges used in this route.", width="large"),
-                                "Amount In": st.column_config.TextColumn(help="USD Value of tokens sent"),
-                                "Simulated Out": st.column_config.TextColumn(help="USD Value of tokens received (after fees/slippage)"),
-                                "Portfolio APY Contribution": st.column_config.NumberColumn(
-                                    help="How much this specific route contributes to your TOTAL portfolio APY (Gross annual yield / Total Budget).",
-                                    format="%.4f%%"
+                                "Execution Path": st.column_config.TextColumn(help="DEXs and Bridges used.", width="medium"),
+                                "Net ROI (1yr $)": st.column_config.NumberColumn(
+                                    help="Expected 1-year yield gain from this move minus the total execution costs.",
+                                    format="$%.2f"
                                 ),
-                                "Slippage Used": st.column_config.TextColumn(help="The slippage tolerance required to get this quote"),
-                                "Jumper Link": st.column_config.LinkColumn("Execute Batch", display_text="Open Jumper"),
-                                "Asset B/E": st.column_config.TextColumn(help="Time for this specific position's yield to pay off the transfer cost. 'Instant' indicates recovery in less than 1 hour."),
-                                "Portfolio B/E": st.column_config.TextColumn(help="Time for your TOTAL portfolio yield to pay off this specific transfer cost. 'Instant' indicates recovery in less than 1 hour.")
+                                "Swap & Impact Cost ($)": st.column_config.TextColumn(
+                                    help="Difference between Amount In and Amount Out. Includes DEX provider fees and price impact due to liquidity depth."
+                                ),
+                                "Slippage Tolerance": st.column_config.TextColumn(
+                                    help="The maximum price movement allowed before the transaction reverts (Safety Limit)."
+                                ),
+                                "Jumper Link": st.column_config.LinkColumn("Execute", display_text="Open Jumper"),
+                                "Asset B/E": st.column_config.TextColumn(help="Time required for this position's yield to cover execution costs.")
                             },
                             hide_index=True,
                             use_container_width=True
