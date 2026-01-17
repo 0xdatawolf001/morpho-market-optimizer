@@ -660,13 +660,6 @@ class RebalanceOptimizer:
 
         # --- Capacity Checks & Warnings ---
         total_whale_cap = sum([b[1] for b in whale_bounds])
-        
-        if total_whale_cap < (self.total_budget):
-            self.capacity_warning = (
-                f"⚠️ **Budget Limited by Safety Caps:** Your total budget (\${self.total_budget:,.0f}) exceeds the "
-                f"combined capacity of your chosen markets (\${total_whale_cap:,.0f}) under current safety rules. "
-                "Some cash will remain unallocated."
-            )
 
         x0 = np.full(n, self.total_budget / n)
         constraints = ({'type': 'eq', 'fun': lambda x: np.sum(x) - self.total_budget})
@@ -961,7 +954,7 @@ with col_scope:
     # FIXED: Removed value= argument. Key handles binding.
     raw_ids = st.text_area(
         "Paste Market IDs or Monarch links (one per line)", 
-        height=300,
+        height=320,
         placeholder="Market IDs or Links...",
         key="portfolio_input_text",
         on_change=handle_text_change 
@@ -980,38 +973,50 @@ with col_scope:
 
 with col_param:
     st.subheader("3. Parameters")
-    # UPDATED: Allows negative input for withdrawal simulation
+    
+    # NEW: Constraint Dropdown
+    rebalance_scope = st.selectbox(
+        "Optimization Constraint",
+        options=[
+            "1) Full Optimization",
+            "2) Within Chain and Same Loan Token",
+            "3) Within Chain and Different Loan Token",
+            "4) Across Chain and Same Loan Token"
+        ],
+        index=0,
+        help="Strictly limits where funds can move. The optimizer is run independently for each group, making it impossible to violate the constraint."
+    )
+
     new_cash = st.number_input(
         "Additional New Cash / Withdrawal (USD)", 
         value=0.0, 
         step=1000.0,
-        help="Positive value = Add Capital. Negative value = Withdraw Capital (Optimizer determines best sell-off)."
+        help="Positive = Add Capital. Negative = Withdraw. (Distributed proportionally to existing silos)."
     )
 
-    # NEW: Portfolio Cap
     max_port_alloc = st.number_input(
         "Max Portfolio Allocation %",
         min_value=0.01,
         max_value=100.0,
         value=100.0,
         step=5.0,
-        help="Hard safety limit: No single market can ever exceed this % of your TOTAL portfolio. Useful for capping protocol risk."
+        help="Safety limit: No single market can exceed this % of the total portfolio."
     )
 
-    # Whale Shield Input
     max_dominance = st.number_input(
         "Whale Shield: Max Dominance %",
         min_value=0.001,
         max_value=1000.0,
         value=30.0,
         step=5.0,
-        help="Hard liquidity limit: You will never own more than this % of a market's AVAILABLE liquidity (Supply - Borrow)."
+        help="Liquidity limit: You will never own more than this % of available liquidity."
     )
 
     min_move_thresh = st.number_input(
         "Min Rebalance Threshold ($)", 
         value=0.0, 
-        step=50.0
+        step=50.0,
+        help='The threshold where the optimizer only allocates if it crosses this amount'
     )
 
 if not df_selected.empty:
@@ -1138,42 +1143,141 @@ if not df_selected.empty:
                 "It sacrifices a small amount of APY to ensure you can exit large positions easily without slippage."
             )
 
+# [FIND THIS SECTION]
+# if st.button("🚀 Run Optimization", type="primary", width='stretch'):
+# ...
+
+# [REPLACE WITH THIS BLOCK]
     if st.button("🚀 Run Optimization", type="primary", width='stretch'):
-        # Add this line to clear previous history cache
+        # 1. Clear State
         if 'hist_demand_df' in st.session_state:
             del st.session_state.hist_demand_df
         
-        # Use existing selection logic for live details
+        # 2. Prepare Data (One Global Fetch First)
         market_data_list = fetch_live_market_details(df_selected)
         
-        # Inject Balance AND Force Exit info
+        # Inject user data
         for m in market_data_list:
             m['existing_balance_usd'] = st.session_state.balance_cache.get(m['Market ID'], 0.0)
             m['force_exit'] = force_exit_map.get(m['Market ID'], False)
 
+        # Global Metrics for reference
         current_annual_interest = sum(m['existing_balance_usd'] * m['current_supply_apy'] for m in market_data_list)
         current_blended_apy = current_annual_interest / current_wealth if current_wealth > 0 else 0.0
 
-    # Pass max_dominance and max_port_alloc to Optimizer
-        opt = RebalanceOptimizer(
-            total_optimizable, 
-            market_data_list, 
-            max_dominance, 
-            max_port_alloc
-        )
-        
-        # Unpack 4 results
-        r_yield, r_frontier, r_liquid, r_whale = opt.optimize()
+        # 3. SILO LOGIC: Group the data BEFORE optimization
+        silos = {}
+        for idx, m in enumerate(market_data_list):
+            # Define the "Key" that makes a market unique based on constraints
+            if "1)" in rebalance_scope:
+                key = "GLOBAL"
+            elif "2)" in rebalance_scope:
+                # Strictly same chain AND same asset
+                key = (m['ChainID'], m['Loan Address']) 
+            elif "3)" in rebalance_scope:
+                # Same chain, any asset (Swapping allowed)
+                key = m['ChainID']
+            elif "4)" in rebalance_scope:
+                # Any chain, same asset (Bridging allowed)
+                key = m['Loan Address']
+            
+            if key not in silos: silos[key] = []
+            silos[key].append(idx)
 
-        # MODIFIED: Pass total_optimizable to filter_small_moves to handle Unallocated Cash
-        cleaned_yield = filter_small_moves(r_yield, market_data_list, min_move_thresh, total_optimizable)
-        cleaned_frontier = filter_small_moves(r_frontier, market_data_list, min_move_thresh, total_optimizable)
-        cleaned_liquid = filter_small_moves(r_liquid, market_data_list, min_move_thresh, total_optimizable)
-        cleaned_whale = filter_small_moves(r_whale, market_data_list, min_move_thresh, total_optimizable)
+        # 4. Initialize Global Result Arrays (Same size as original list)
+        n = len(market_data_list)
+        final_y = np.zeros(n)
+        final_f = np.zeros(n)
+        final_l = np.zeros(n)
+        final_w = np.zeros(n)
         
+        # Trace accumulators
+        global_yield_trace = []
+        global_frontier_trace = []
+        global_liquid_trace = []
+        global_whale_trace = []
+        global_attempts = []
+        global_capacity_warnings = []
+
+        # 5. EXECUTION LOOP: Run Optimizer for each Silo independently
+        progress_text = "Optimizing Silos..."
+        my_bar = st.progress(0, text=progress_text)
+        silo_count = len(silos)
+        
+        # MATH FIX: Calculate the Global Portfolio Cap in USD first
+        # This ensures safety limits are based on your TOTAL wealth, not the silo slice.
+        global_port_cap_usd = total_optimizable * (max_port_alloc / 100.0)
+
+        for i, (key, indices) in enumerate(silos.items()):
+            # Subset the markets
+            silo_markets = [market_data_list[idx] for idx in indices]
+            
+            # Calculate Silo Budget
+            silo_existing_wealth = sum(m['existing_balance_usd'] for m in silo_markets)
+            
+            if current_wealth > 0:
+                share_of_port = silo_existing_wealth / current_wealth
+                silo_budget = silo_existing_wealth + (new_cash * share_of_port)
+            else:
+                silo_budget = new_cash / silo_count
+            
+            if silo_budget <= 0.01:
+                my_bar.progress((i + 1) / silo_count, text=f"Skipping empty silo {key}...")
+                continue
+                
+            # MATH FIX: Adjust the percentage for this specific silo
+            # We want: (Silo_Budget * Adjusted_Pct) = Global_Cap_USD
+            # Therefore: Adjusted_Pct = (Global_Cap_USD / Silo_Budget)
+            # We multiply by 100 because the Optimizer expects a percentage input (0-100).
+            if silo_budget > 0:
+                adjusted_max_alloc_pct = (global_port_cap_usd / silo_budget) * 100.0
+            else:
+                adjusted_max_alloc_pct = 100.0
+
+            # RUN OPTIMIZER ON SUBSET with ADJUSTED CAP
+            opt = RebalanceOptimizer(silo_budget, silo_markets, max_dominance, adjusted_max_alloc_pct)
+            r_y, r_f, r_l, r_w = opt.optimize()
+
+            # Map results back to the Global Indices
+            for local_idx, global_idx in enumerate(indices):
+                final_y[global_idx] = r_y[local_idx]
+                final_f[global_idx] = r_f[local_idx]
+                final_l[global_idx] = r_l[local_idx]
+                final_w[global_idx] = r_w[local_idx]
+
+            # Aggregate metadata for charts
+            global_yield_trace.extend(opt.yield_trace)
+            global_frontier_trace.extend(opt.frontier_trace)
+            global_liquid_trace.extend(opt.liquid_trace)
+            global_whale_trace.extend(opt.whale_trace)
+            global_attempts.extend(opt.all_attempts)
+            if opt.capacity_warning:
+                # Clarify which silo triggered the warning
+                global_capacity_warnings.append(f"Silo [{key}]: {opt.capacity_warning}")
+            
+            my_bar.progress((i + 1) / silo_count, text=f"Optimized Silo: {key}")
+        
+        my_bar.empty()
+
+        # 6. Apply Final Dust Filters to the Globals
+        cleaned_yield = filter_small_moves(final_y, market_data_list, min_move_thresh, total_optimizable)
+        cleaned_frontier = filter_small_moves(final_f, market_data_list, min_move_thresh, total_optimizable)
+        cleaned_liquid = filter_small_moves(final_l, market_data_list, min_move_thresh, total_optimizable)
+        cleaned_whale = filter_small_moves(final_w, market_data_list, min_move_thresh, total_optimizable)
+        
+        # 7. Store Results
+        # We create a dummy optimizer object just to hold the traces/warnings for the UI to read
+        dummy_opt = RebalanceOptimizer(total_optimizable, market_data_list, max_dominance, max_port_alloc)
+        dummy_opt.yield_trace = global_yield_trace
+        dummy_opt.frontier_trace = global_frontier_trace
+        dummy_opt.liquid_trace = global_liquid_trace
+        dummy_opt.whale_trace = global_whale_trace
+        dummy_opt.all_attempts = global_attempts
+        dummy_opt.capacity_warning = " | ".join(global_capacity_warnings) if global_capacity_warnings else None
+
         st.session_state['opt_results'] = {
             'market_data_list': market_data_list,
-            'opt_object': opt,
+            'opt_object': dummy_opt, 
             'best_yield_alloc': cleaned_yield,
             'frontier_alloc': cleaned_frontier,
             'liquid_alloc': cleaned_liquid,
@@ -1183,12 +1287,12 @@ if not df_selected.empty:
                 'blended_apy': current_blended_apy
             },
             'traces': {
-                'yield': opt.yield_trace,
-                'frontier': opt.frontier_trace,
-                'liquid': opt.liquid_trace,
-                'whale': opt.whale_trace
+                'yield': global_yield_trace,
+                'frontier': global_frontier_trace,
+                'liquid': global_liquid_trace,
+                'whale': global_whale_trace
             },
-            'attempts': opt.all_attempts
+            'attempts': global_attempts
         }
 
     # ==========================================
@@ -1686,89 +1790,112 @@ if not df_selected.empty:
 # 5. EXECUTION LOGIC & TABLES
 # ==========================================
 
-        # 2. Operational Split (Rebalance vs Swap vs Bridge)
         st.markdown("#### 📤 Withdrawal Operations Split")
-        st.caption("Breakdown of where funds withdrawn from specific markets are destined to go.")
+        st.caption("How funds move from source markets to destinations based on your constraints.")
         
-        # --- A. Theoretical Split ---
-        # 1. Calculate Demand (Where money is going)
-        chain_capacities = {} 
-        token_capacities = {} 
+        # 1. Define Silo Mapping for the Table
+        def get_silo_key(row):
+            if "1)" in rebalance_scope: return "GLOBAL"
+            if "2)" in rebalance_scope: return (row['Chain'], row['Token'])
+            if "3)" in rebalance_scope: return row['Chain']
+            if "4)" in rebalance_scope: return row['Token']
+            return "GLOBAL"
+
+        # 2. Calculate Demand within Silos
+        silo_token_demand = {} # (Chain, Token) -> Amount
+        silo_chain_demand = {} # Chain -> Amount
+        silo_global_demand = {} # Silo Key -> Amount
         
         deposits = df_res[df_res['Net Move ($)'] > 0.01]
         for _, row in deposits.iterrows():
-            c = row['Chain']
-            t = row['Token']
+            c, t = row['Chain'], row['Token']
             amt = row['Net Move ($)']
-            chain_capacities[c] = chain_capacities.get(c, 0.0) + amt
-            token_capacities[(c, t)] = token_capacities.get((c, t), 0.0) + amt
+            s_key = get_silo_key(row)
+            
+            silo_token_demand[(c, t)] = silo_token_demand.get((c, t), 0.0) + amt
+            silo_chain_demand[c] = silo_chain_demand.get(c, 0.0) + amt
+            silo_global_demand[s_key] = silo_global_demand.get(s_key, 0.0) + amt
             
         withdraw_logic = []
-        # 2. Process Withdrawals (Where money is coming from) - Market Level
         withdrawals = df_res[df_res['Net Move ($)'] < -0.01].copy()
         
         for _, row in withdrawals.iterrows():
-            src_chain = row['Chain']
-            src_token = row['Token']
-            src_name = row['Market']
-            src_id = row['Destination ID']
+            src_chain, src_token = row['Chain'], row['Token']
+            src_name, src_id = row['Market'], row['Destination ID']
             total_moved = abs(row['Net Move ($)'])
-            remaining_val = total_moved
+            remaining = total_moved
+            s_key = get_silo_key(row)
             
-            # 1. Match: Rebalance (Same Chain, Same Token)
-            specific_cap = token_capacities.get((src_chain, src_token), 0.0)
-            matched_rebalance = min(remaining_val, specific_cap)
-            
-            if matched_rebalance > 0:
-                token_capacities[(src_chain, src_token)] -= matched_rebalance
-                chain_capacities[src_chain] -= matched_rebalance
-                remaining_val -= matched_rebalance
-            
-            # 2. Match: Swap (Same Chain, Different Token)
-            general_cap = chain_capacities.get(src_chain, 0.0)
-            matched_swap = min(remaining_val, general_cap)
-            
-            if matched_swap > 0:
-                chain_capacities[src_chain] -= matched_swap
-                remaining_val -= matched_swap
-                
-            # 3. Match: Bridge (Exit Chain)
-            matched_bridge = remaining_val
-            
+            # 1. Internal Rebalance (Same Asset, Same Chain)
+            # This is always allowed in every mode
+            matched_reb = min(remaining, silo_token_demand.get((src_chain, src_token), 0.0))
+            if matched_reb > 0.01:
+                silo_token_demand[(src_chain, src_token)] -= matched_reb
+                silo_chain_demand[src_chain] -= matched_reb
+                silo_global_demand[s_key] -= matched_reb
+                remaining -= matched_reb
+            else: matched_reb = 0.0
+
+            # 2. Internal Swap (Same Chain, Different Token)
+            # Only allowed if scope is "Full" or "Within Chain/Diff Token"
+            matched_swap = 0.0
+            if "1)" in rebalance_scope or "3)" in rebalance_scope:
+                matched_swap = min(remaining, silo_chain_demand.get(src_chain, 0.0))
+                if matched_swap > 0.01:
+                    silo_chain_demand[src_chain] -= matched_swap
+                    silo_global_demand[s_key] -= matched_swap
+                    remaining -= matched_swap
+                else: matched_swap = 0.0
+
+            # 3. Bridge Out (Different Chain)
+            # Only allowed if scope is "Full" or "Across Chain/Same Token"
+            matched_bridge = 0.0
+            if "1)" in rebalance_scope or "4)" in rebalance_scope:
+                matched_bridge = min(remaining, silo_global_demand.get(s_key, 0.0))
+                if matched_bridge > 0.01:
+                    silo_global_demand[s_key] -= matched_bridge
+                    remaining -= matched_bridge
+                else: matched_bridge = 0.0
+
+            # 4. Cash Out (Wallet) - The remainder
+            matched_cash = remaining
+
             withdraw_logic.append({
                 "Source Market": src_name,
                 "Market ID": src_id,
                 "Chain": src_chain,
                 "Asset": src_token,
                 "Total Withdrawal": total_moved,
-                "1. Internal Rebalance (Same Asset)": matched_rebalance,
-                "2. Internal Swap (Same Chain)": matched_swap,
-                "3. Bridge Out (New Chain)": matched_bridge
+                "1. Internal Rebalance": matched_reb,
+                "2. Internal Swap": matched_swap,
+                "3. Bridge Out": matched_bridge,
+                "4. Cash Out": matched_cash
             })
             
         if withdraw_logic:
-            df_ops = pd.DataFrame(withdraw_logic)
             st.dataframe(
-                df_ops.style.format({
-                    "Total Withdrawal": "${:,.2f}",
-                    "1. Internal Rebalance (Same Asset)": "${:,.2f}",
-                    "2. Internal Swap (Same Chain)": "${:,.2f}",
-                    "3. Bridge Out (New Chain)": "${:,.2f}"
-                }).applymap(lambda x: 'background-color: #1b5e20; color: white' if x > 0.01 else '', subset=["1. Internal Rebalance (Same Asset)"])
-                  .applymap(lambda x: 'background-color: #01579b; color: white' if x > 0.01 else '', subset=["2. Internal Swap (Same Chain)"])
-                  .applymap(lambda x: 'background-color: #b71c1c; color: white' if x > 0.01 else '', subset=["3. Bridge Out (New Chain)"]),
-                width='stretch',
-                hide_index=True
+                pd.DataFrame(withdraw_logic).style.format({
+                    "Total Withdrawal": "${:,.2f}", "1. Internal Rebalance": "${:,.2f}",
+                    "2. Internal Swap": "${:,.2f}", "3. Bridge Out": "${:,.2f}", "4. Cash Out": "${:,.2f}"
+                }).applymap(lambda x: 'background-color: #1b5e20; color: white' if x > 0.01 else '', subset=["1. Internal Rebalance"])
+                  .applymap(lambda x: 'background-color: #01579b; color: white' if x > 0.01 else '', subset=["2. Internal Swap"])
+                  .applymap(lambda x: 'background-color: #b71c1c; color: white' if x > 0.01 else '', subset=["3. Bridge Out"])
+                  .applymap(lambda x: 'background-color: #424242; color: white' if x > 0.01 else '', subset=["4. Cash Out"]),
+                width='stretch', hide_index=True
             )
         else:
             st.info("No withdrawals required for this strategy.")
 
-        # --- B. Calculate Actual Transfers (Greedy Match) ---
-        sources = []
-        # Enrich source data with necessary metadata for LI.FI
+        # --- B. Calculate Actual Transfers (Grouped Match) ---
+        
+        # 1. Prepare Source and Destination Lists
+        all_sources = []
+        wallet_source = None
+        
+        # Enrich source data
         withdraw_df = df_res[df_res["Liquid Move ($)"] < -0.01]
         for _, row in withdraw_df.iterrows():
-            sources.append({
+            item = {
                 "id": row['Market ID Full'],
                 "name": row['Market'],
                 "chain": row['Chain'],
@@ -1776,119 +1903,147 @@ if not df_selected.empty:
                 "available": abs(row['Liquid Move ($)']),
                 "running_balance": row['Current ($)'],
                 "type": "Market",
-                # Metadata for LI.FI
+                # Metadata
                 "chain_id": row.get('ChainID'),
                 "token_address": row.get('Loan Address', None) or st.session_state.market_dict[st.session_state.market_dict['Market ID'] == row['Market ID Full']].iloc[0]['Loan Address'],
                 "decimals": st.session_state.market_dict[st.session_state.market_dict['Market ID'] == row['Market ID Full']].iloc[0]['Decimals'],
                 "price": row.get('Price USD', 1.0)
-            })
+            }
+            all_sources.append(item)
             
+        # Prepare Wallet Source separately (Global Reserve)
         if new_cash > 0.01:
-            sources.append({ 
-                "id": "Wallet",
-                "name": "New Capital", 
-                "chain": "Wallet",
-                "token": "CASH",
-                "available": new_cash, 
-                "running_balance": new_cash, 
-                "type": "Wallet",
+            wallet_source = { 
+                "id": "Wallet", "name": "New Capital", "chain": "Wallet", "token": "CASH",
+                "available": new_cash, "running_balance": new_cash, "type": "Wallet",
                 "chain_id": None, "token_address": None, "decimals": 18, "price": 1.0
-            })
+            }
             
-        destinations = []
+        all_destinations = []
         deposit_df = df_res[df_res["Net Move ($)"] > 0.01]
         for _, row in deposit_df.iterrows():
-            destinations.append({
+            all_destinations.append({
                 "id": row['Market ID Full'],
                 "name": row['Market'],
                 "chain": row['Chain'],
                 "token": row['Token'],
                 "needed": row['Net Move ($)'],
                 "running_balance": row['Current ($)'],
-                # Metadata for LI.FI
+                # Metadata
                 "chain_id": row.get('ChainID'),
                 "token_address": row.get('Loan Address', None) or st.session_state.market_dict[st.session_state.market_dict['Market ID'] == row['Market ID Full']].iloc[0]['Loan Address'],
                 "apy": row.get('Simulated APY', 0.0)
             })
 
-        transfer_steps = []
-        src_idx, dst_idx = 0, 0
-        ordering_counter = 1
+        # 2. Define Grouping Key based on Scope
+        def get_group_key(item):
+            if "1)" in rebalance_scope: return "GLOBAL"
+            if "2)" in rebalance_scope: return (item['chain'], item['token']) # Exact Match
+            if "3)" in rebalance_scope: return item['chain'] # Same Chain, Swap OK
+            if "4)" in rebalance_scope: return item['token'] # Same Token, Bridge OK
+            return "GLOBAL"
+
+        # 3. Bucketize
+        groups = {}
         
-        # 1. Match Sources to Destinations
-        while src_idx < len(sources) and dst_idx < len(destinations):
-            src, dst = sources[src_idx], destinations[dst_idx]
-            amount_to_move = min(src['available'], dst['needed'])
+        # Bucket Sources
+        for src in all_sources:
+            k = get_group_key(src)
+            if k not in groups: groups[k] = {'src': [], 'dst': []}
+            groups[k]['src'].append(src)
             
-            if amount_to_move > 0.01: 
-                dst['running_balance'] += amount_to_move
-                src['running_balance'] -= amount_to_move
+        # Bucket Destinations
+        for dst in all_destinations:
+            k = get_group_key(dst)
+            if k not in groups: groups[k] = {'src': [], 'dst': []}
+            groups[k]['dst'].append(dst)
+
+        transfer_steps = []
+        ordering_counter = 1
+
+        # 4. Matching Logic (Per Group)
+        for g_key, bucket in groups.items():
+            g_srcs = bucket['src']
+            g_dsts = bucket['dst']
+            
+            s_idx, d_idx = 0, 0
+            
+            while d_idx < len(g_dsts):
+                dst = g_dsts[d_idx]
+                amount_needed = dst['needed']
                 
-                # Determine Operation Type
-                if src['type'] == "Wallet":
-                    op_type = "New Deposit"
-                    op_code = 0
-                elif src['chain'] != dst['chain']:
-                    op_type = "3. Bridge"
-                    op_code = 3
-                else:
-                    if src['token'] == dst['token']:
-                        op_type = "1. Rebalance"
-                        op_code = 1
+                # Try to fill from Group Source first
+                amount_from_src = 0.0
+                src = None
+                
+                if s_idx < len(g_srcs):
+                    src = g_srcs[s_idx]
+                    amount_from_src = min(src['available'], amount_needed)
+                
+                # If no group source available (or empty), try Wallet
+                used_wallet = False
+                if amount_from_src < 0.01 and wallet_source and wallet_source['available'] > 0.01:
+                    src = wallet_source
+                    amount_from_src = min(src['available'], amount_needed)
+                    used_wallet = True
+                
+                if amount_from_src > 0.01:
+                    # Update balances
+                    dst['running_balance'] += amount_from_src
+                    src['running_balance'] -= amount_from_src
+                    src['available'] -= amount_from_src
+                    dst['needed'] -= amount_from_src
+                    
+                    # Log Step
+                    if src['type'] == "Wallet":
+                        op_type, op_code = "New Deposit", 0
+                    elif src['chain'] != dst['chain']:
+                        op_type, op_code = "3. Bridge", 3
+                    elif src['token'] != dst['token']:
+                        op_type, op_code = "2. Swap", 2
                     else:
-                        op_type = "2. Swap"
-                        op_code = 2
+                        op_type, op_code = "1. Rebalance", 1
+                        
+                    transfer_steps.append({
+                        "Ordering": ordering_counter,
+                        "Operation Type": op_type, "OpCode": op_code,
+                        "From": src['name'], "From Market ID": src.get('id', 'N/A')[:7],
+                        "From (Chain)": src['chain'], "From (Token)": src['token'],
+                        "To": dst['name'], "To Market ID": dst.get('id', 'N/A')[:7],
+                        "To (Chain)": dst['chain'], "To (Token)": dst['token'],
+                        "Amount to move ($)": amount_from_src,
+                        "Remaining Funds In Source ($)": src['running_balance'],
+                        # Metadata for LI.FI
+                        "src_chain_id": src.get('chain_id'), "dst_chain_id": dst.get('chain_id'),
+                        "src_token": src.get('token_address'), "dst_token": dst.get('token_address'),
+                        "decimals": src.get('decimals', 18), "price": src.get('price', 1.0), "dst_apy": dst.get('apy', 0.0)
+                    })
+                    ordering_counter += 1
+                    
+                    if src['available'] < 0.01 and not used_wallet: s_idx += 1
+                    if dst['needed'] < 0.01: d_idx += 1
+                else:
+                    # Cannot fill this destination from current sources or wallet?
+                    # This shouldn't happen if math is right, but break to avoid infinite loop
+                    d_idx += 1
 
-                transfer_steps.append({
-                    "Ordering": ordering_counter,
-                    "From": src['name'],
-                    "From Market ID": src.get('id', 'N/A')[:7],
-                    "From (Chain)": src['chain'],
-                    "From (Token)": src['token'],  # <--- ADD THIS LINE
-                    "To": dst['name'],
-                    "To Market ID": dst.get('id', 'N/A')[:7],
-                    "To (Chain)": dst['chain'],
-                    "To (Token)": dst['token'],    # <--- ADD THIS LINE
-                    "Amount to move ($)": amount_to_move,
-                    "Remaining Funds In Source ($)": src['running_balance'],
-                    "Operation Type": op_type,
-                    "OpCode": op_code,
-                    # Hidden Metadata for Analysis
-                    "src_chain_id": src.get('chain_id'),
-                    "dst_chain_id": dst.get('chain_id'),
-                    "src_token": src.get('token_address'),
-                    "dst_token": dst.get('token_address'),
-                    "decimals": src.get('decimals', 18),
-                    "price": src.get('price', 1.0),
-                    "dst_apy": dst.get('apy', 0.0)
-                })
-                ordering_counter += 1
-            
-            src['available'] -= amount_to_move
-            dst['needed'] -= amount_to_move
-            
-            if src['available'] < 0.01: src_idx += 1
-            if dst['needed'] < 0.01: dst_idx += 1
-
-        # 2. Handle Leftover Sources (Market -> Wallet)
-        while src_idx < len(sources):
-            src = sources[src_idx]
-            if src['available'] > 0.01 and src['available'] >= min_move_thresh:
-                src['running_balance'] -= src['available']
-                transfer_steps.append({
-                    "Ordering": ordering_counter,
-                    "From": src['name'],
-                    "From (Chain)": src['chain'],
-                    "From (Token)": src['token'],
-                    "To": "Wallet (Unallocated)",
-                    "To (Chain)": "Wallet",
-                    "Amount to move ($)": src['available'],
-                    "Remaining Funds In Source ($)": src['running_balance'],
-                    "Operation Type": "Cash Out",
-                    "OpCode": 0
-                })
-                ordering_counter += 1
-            src_idx += 1
+        # 5. Handle Leftover Sources (Cash Out)
+        # Any source in any group that still has money -> Wallet
+        for g_key, bucket in groups.items():
+            for src in bucket['src']:
+                if src['available'] > 0.01 and src['available'] >= min_move_thresh:
+                    src['running_balance'] -= src['available']
+                    transfer_steps.append({
+                        "Ordering": ordering_counter,
+                        "Operation Type": "Cash Out", "OpCode": 0,
+                        "From": src['name'], "From Market ID": src.get('id', 'N/A')[:7],
+                        "From (Chain)": src['chain'], "From (Token)": src['token'],
+                        "To": "Wallet (Unallocated)", "To Market ID": "N/A",
+                        "To (Chain)": "Wallet", "To (Token)": "CASH",
+                        "Amount to move ($)": src['available'],
+                        "Remaining Funds In Source ($)": src['running_balance']
+                    })
+                    ordering_counter += 1
 
         st.divider()
         st.subheader("📋 Execution Plan")
@@ -1904,9 +2059,9 @@ if not df_selected.empty:
             df_actions = pd.DataFrame(transfer_steps)
             
             def highlight_op(val):
-                if "1." in val: return 'color: #00E676; font-weight: bold;' # Brighter Green
-                if "2." in val: return 'color: #01579b; font-weight: bold;' # Blue
-                if "3." in val: return 'color: #b71c1c; font-weight: bold;' # Red
+                if "1." in val: return 'color: #00E676; font-weight: bold;'
+                if "2." in val: return 'color: #01579b; font-weight: bold;'
+                if "3." in val: return 'color: #b71c1c; font-weight: bold;'
                 return ''
 
             st.dataframe(
