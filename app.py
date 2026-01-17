@@ -2105,7 +2105,14 @@ if not df_selected.empty:
                 c_an1, c_an2 = st.columns([1, 2])
                 with c_an1:
                     # User inputs Percentage (e.g. 0.5), we convert to decimal (0.005) later
-                    user_slippage_pct = st.number_input("Target Slippage Tolerance (%)", min_value=0.0001, max_value=5.0, value=0.0001)
+                    user_slippage_pct = st.number_input(
+                        "Target Slippage Tolerance (%)", 
+                        min_value=0.0001, 
+                        max_value=5.0, 
+                        value=0.0001, 
+                        step=0.0001, 
+                        format="%.4f"
+                    )
                     
                 with c_an2:
                     st.write("") # Spacer
@@ -2183,7 +2190,8 @@ if not df_selected.empty:
                         gas_display = fee_display = slip_display = "$0.00"
                         amt_in_display = f"${batch_total_usd:,.2f}" # Default to theoretical if fail
                         amt_out_display = "$0.00"
-                        slippage_used_display = "Failed"
+                        slippage_used_display = f"{quote_res['slippage_used']*100:.4f}%"
+                        execution_path_display = quote_res['execution_path']
                         execution_path_display = "No Route Found"
                         signal = "⚪ Unknown"
 
