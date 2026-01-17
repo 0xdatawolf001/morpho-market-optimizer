@@ -1170,6 +1170,9 @@ if not df_selected.empty:
         if 'hist_demand_df' in st.session_state:
             del st.session_state.hist_demand_df
         
+        # NEW: Reset the demand trend trigger so it doesn't auto-run on new results
+        st.session_state.run_demand_trend = False
+        
         # 2. Prepare Data
         market_data_list = fetch_live_market_details(df_selected)
         
@@ -1491,114 +1494,117 @@ if not df_selected.empty:
         st.divider()
 
         # --- FULL WIDTH: DEMAND TRENDS CHART ---
-        d_col_header, d_col_filter = st.columns([2, 1])
-        with d_col_header:
-            st.subheader("📈 30-Day Balanced Demand Trend")
-            st.caption("Growth of the square root of Supply x Borrow relative to start of period. Rewards balanced market synergy and penalizes ghost/diluted pools.")
+        st.subheader("📈 30-Day Balanced Demand Trend")
+        st.caption("Growth of the square root of Supply x Borrow relative to start of period. Rewards balanced market synergy and penalizes ghost/diluted pools.")
+
+        # Initialize trigger state
+        if 'run_demand_trend' not in st.session_state:
+            st.session_state.run_demand_trend = False
+
+        # Red Primary Button for Trend Analysis
+        if not st.session_state.run_demand_trend:
+            if st.button("🔍 Run 30-Day Demand Trend Analysis", type="primary", use_container_width=True):
+                st.session_state.run_demand_trend = True
+                st.rerun()
         
-        # 1. Prepare list for fetching
-        targets_for_history = []
-        for m in market_data_list:
-            targets_for_history.append({
-                "uniqueKey": m['Market ID'],
-                "chainId": m['ChainID'],
-                "name": f"{m['Loan Token']}/{m['Collateral']}"
-            })
-        
-        # 2. Fetch Data (Cached)
-        if 'hist_demand_df' not in st.session_state:
-            st.session_state.hist_demand_df = fetch_historical_flows(targets_for_history)
-        
-        df_history = st.session_state.hist_demand_df
-        
-        if not df_history.empty:
+        if st.session_state.run_demand_trend:
+            # 1. Prepare list for fetching
+            targets_for_history = []
+            for m in market_data_list:
+                targets_for_history.append({
+                    "uniqueKey": m['Market ID'],
+                    "chainId": m['ChainID'],
+                    "name": f"{m['Loan Token']}/{m['Collateral']}"
+                })
             
-            # --- FILTER LOGIC ---
-            # Calculate the final value for every market to determine trend
-            trend_summary = df_history.sort_values('date').groupby('Market')['indexed_demand'].last()
+            # 2. Fetch Data (Cached)
+            if 'hist_demand_df' not in st.session_state:
+                st.session_state.hist_demand_df = fetch_historical_flows(targets_for_history)
             
-            with d_col_filter:
-                filter_mode = st.radio(
-                    "Filter Trends:",
-                    ["All", "Growth (> 1.0)", "Decay (≤ 1.0)"],
-                    horizontal=True,
-                    key="trend_filter_radio"
-                )
-
-            # Apply Filter
-            markets_to_show = trend_summary.index.tolist() # Default All
+            df_history = st.session_state.hist_demand_df
             
-            if "Growth" in filter_mode:
-                markets_to_show = trend_summary[trend_summary > 1.0].index.tolist()
-            elif "Decay" in filter_mode:
-                markets_to_show = trend_summary[trend_summary <= 1.0].index.tolist()
-            
-            df_hist_filtered = df_history[df_history['Market'].isin(markets_to_show)]
-
-            if not df_hist_filtered.empty:
-                # --- INTERACTIVE ELEMENTS ---
-                selection = alt.selection_point(fields=['Market'], bind='legend')
-                hover = alt.selection_point(
-                    fields=['date'], 
-                    nearest=True, 
-                    on='mouseover', 
-                    empty=False, 
-                    clear='mouseout'
-                )
-
-                # 3. Base Line Chart
-                base = alt.Chart(df_hist_filtered).encode(
-                    x=alt.X('date:T', title=None, axis=alt.Axis(format='%b %d')),
-                    y=alt.Y('indexed_demand:Q', 
-                            title='Growth Index', 
-                            axis=alt.Axis(format='.2f', grid=True),
-                            scale=alt.Scale(zero=False)), 
-                    color=alt.Color('Market:N', legend=alt.Legend(
-                        orient='bottom', 
-                        title='Market ID & Pair',
-                        columns=4, # More columns since it's full width
-                        labelLimit=0,
-                        symbolLimit=100,
-                        padding=10
-                    ))
-                )
-
-                # The visible lines
-                lines = base.mark_line(interpolate='monotone').encode(
-                    opacity=alt.condition(selection, alt.value(1), alt.value(0.15)),
-                    strokeWidth=alt.condition(selection, alt.value(2.5), alt.value(1))
-                ).add_params(selection)
-
-                # Transparent selectors for hover behavior
-                selectors = base.mark_point().encode(
-                    opacity=alt.value(0),
-                    tooltip=[
-                        alt.Tooltip('date:T', title='Date', format='%Y-%m-%d'),
-                        alt.Tooltip('Market:N', title='Market'),
-                        alt.Tooltip('indexed_demand:Q', title='Index Value', format='.3f')
-                    ]
-                ).add_params(hover)
-
-                # Points that appear on hover
-                points = base.mark_point().encode(
-                    opacity=alt.condition(hover, alt.value(1), alt.value(0))
-                )
-
-                # Vertical rule that follows mouse
-                rules = base.mark_rule(color='white', strokeWidth=0.5).encode(
-                    opacity=alt.condition(hover, alt.value(0.3), alt.value(0))
-                ).transform_filter(hover)
-
-                # Layering the chart components - Height increased to 450
-                final_chart = alt.layer(
-                    lines, selectors, points, rules
-                ).properties(height=450).interactive()
+            if not df_history.empty:
+                # --- FILTER LOGIC ---
+                trend_summary = df_history.sort_values('date').groupby('Market')['indexed_demand'].last()
                 
-                st.altair_chart(final_chart, use_container_width=True)
+                d_col_empty, d_col_filter = st.columns([2, 1])
+                with d_col_filter:
+                    filter_mode = st.radio(
+                        "Filter Trends:",
+                        ["All", "Growth (> 1.0)", "Decay (≤ 1.0)"],
+                        horizontal=True,
+                        key="trend_filter_radio"
+                    )
+
+                # Apply Filter
+                markets_to_show = trend_summary.index.tolist()
+                
+                if "Growth" in filter_mode:
+                    markets_to_show = trend_summary[trend_summary > 1.0].index.tolist()
+                elif "Decay" in filter_mode:
+                    markets_to_show = trend_summary[trend_summary <= 1.0].index.tolist()
+                
+                df_hist_filtered = df_history[df_history['Market'].isin(markets_to_show)]
+
+                if not df_hist_filtered.empty:
+                    # --- INTERACTIVE ELEMENTS ---
+                    selection = alt.selection_point(fields=['Market'], bind='legend')
+                    hover = alt.selection_point(
+                        fields=['date'], 
+                        nearest=True, 
+                        on='mouseover', 
+                        empty=False, 
+                        clear='mouseout'
+                    )
+
+                    # 3. Base Line Chart
+                    base = alt.Chart(df_hist_filtered).encode(
+                        x=alt.X('date:T', title=None, axis=alt.Axis(format='%b %d')),
+                        y=alt.Y('indexed_demand:Q', 
+                                title='Growth Index', 
+                                axis=alt.Axis(format='.2f', grid=True),
+                                scale=alt.Scale(zero=False)), 
+                        color=alt.Color('Market:N', legend=alt.Legend(
+                            orient='bottom', 
+                            title='Market ID & Pair',
+                            columns=4,
+                            labelLimit=0,
+                            symbolLimit=100,
+                            padding=10
+                        ))
+                    )
+
+                    lines = base.mark_line(interpolate='monotone').encode(
+                        opacity=alt.condition(selection, alt.value(1), alt.value(0.15)),
+                        strokeWidth=alt.condition(selection, alt.value(2.5), alt.value(1))
+                    ).add_params(selection)
+
+                    selectors = base.mark_point().encode(
+                        opacity=alt.value(0),
+                        tooltip=[
+                            alt.Tooltip('date:T', title='Date', format='%Y-%m-%d'),
+                            alt.Tooltip('Market:N', title='Market'),
+                            alt.Tooltip('indexed_demand:Q', title='Index Value', format='.3f')
+                        ]
+                    ).add_params(hover)
+
+                    points = base.mark_point().encode(
+                        opacity=alt.condition(hover, alt.value(1), alt.value(0))
+                    )
+
+                    rules = base.mark_rule(color='white', strokeWidth=0.5).encode(
+                        opacity=alt.condition(hover, alt.value(0.3), alt.value(0))
+                    ).transform_filter(hover)
+
+                    final_chart = alt.layer(
+                        lines, selectors, points, rules
+                    ).properties(height=450).interactive()
+                    
+                    st.altair_chart(final_chart, use_container_width=True)
+                else:
+                    st.info(f"No markets found matching filter: {filter_mode}")
             else:
-                st.info(f"No markets found matching filter: {filter_mode}")
-        else:
-            st.info("No historical data available for selected markets.")
+                st.info("No historical data available for selected markets.")
 
         st.divider()
         st.subheader("🔍 Results")
