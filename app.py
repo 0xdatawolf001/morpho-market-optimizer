@@ -633,20 +633,27 @@ class RebalanceOptimizer:
             whale_cap_factor = self.max_dominance_ratio / (1.0 - self.max_dominance_ratio)
 
         for m in self.markets:
-            # --- FORCE EXIT LOGIC ---
+            current_bal = m.get('existing_balance_usd', 0.0)
+
+            # A. PRIORITY 1: LOCK ALLOCATION
+            if m.get('lock_allocation', False):
+                standard_bounds.append((current_bal, current_bal))
+                whale_bounds.append((current_bal, current_bal))
+                continue
+
+            # B. PRIORITY 2: FORCE EXIT
             if m.get('force_exit', False):
                 standard_bounds.append((0.0, 0.0))
                 whale_bounds.append((0.0, 0.0))
                 continue
 
-            # A. Standard Bound: Min(Budget, Portfolio Cap)
+            # C. STANDARD BOUNDS
             standard_bounds.append((0.0, min(self.total_budget, port_cap_usd)))
             
-            # B. Whale Bound: Min(Budget, Portfolio Cap, Liquidity Shield)
+            # D. WHALE BOUNDS
             token_price = m.get('Price USD', 0)
             multiplier = 10**m.get('Decimals', 18)
-            user_existing_usd = m.get('existing_balance_usd', 0.0)
-            user_existing_wei = (user_existing_usd / token_price) * multiplier if token_price > 0 else 0
+            user_existing_wei = (current_bal / token_price) * multiplier if token_price > 0 else 0
             
             total_supply_wei = m.get('raw_supply', 0)
             total_borrow_wei = m.get('raw_borrow', 0)
@@ -655,17 +662,27 @@ class RebalanceOptimizer:
             base_available_usd = (base_available_wei / multiplier) * token_price if token_price > 0 else 0
             
             liq_shield_cap = base_available_usd * whale_cap_factor
-            
             whale_bounds.append((0.0, min(self.total_budget, port_cap_usd, liq_shield_cap)))
 
-        # --- Capacity Checks & Warnings ---
-        total_whale_cap = sum([b[1] for b in whale_bounds])
+        # Starting guess: Try to respect bounds immediately for speed
+        x0 = np.zeros(n)
+        remaining_budget = self.total_budget
+        
+        # First, assign locked/force-exit values to x0
+        for i, b in enumerate(standard_bounds):
+            if b[0] == b[1]: 
+                x0[i] = b[0]
+                remaining_budget -= b[0]
+        
+        # Distribute remainder to non-fixed markets
+        fixed_mask = np.array([b[0] == b[1] for b in standard_bounds])
+        if not all(fixed_mask):
+            x0[~fixed_mask] = max(0, remaining_budget) / np.sum(~fixed_mask)
 
-        x0 = np.full(n, self.total_budget / n)
         constraints = ({'type': 'eq', 'fun': lambda x: np.sum(x) - self.total_budget})
         options = {'maxiter': 5000, 'ftol': 1e-6}
 
-        # Optimizer execution
+        # Run the optimizations
         res_yield = minimize(self.objective_yield, x0, method='SLSQP', bounds=standard_bounds, constraints=constraints, options=options)
         best_yield_alloc = self._get_normalized_allocations(res_yield.x)
 
@@ -1026,8 +1043,11 @@ if not df_selected.empty:
         lambda x: st.session_state.balance_cache.get(x, 0.0)
     )
     
-    # 2. Add Force Exit Column (Default False)
-    df_selected['Force Exit'] = False
+    # 2. Add Toggle Columns
+    if 'Force Exit' not in df_selected:
+        df_selected['Force Exit'] = False
+    if 'Lock Allocation' not in df_selected:
+        df_selected['Lock Allocation'] = False
 
     # Add the URL column
     df_selected['Link To Market'] = df_selected.apply(
@@ -1049,13 +1069,13 @@ if not df_selected.empty:
                         val = 0.0
                     st.session_state.balance_cache[m_id] = val
 
-    # Locate the st.data_editor block and replace it with this version
+    # Locate and replace the full st.data_editor block
     edited_df = st.data_editor(
         df_selected[[
             'Market ID', 'Chain', 'Loan Token', 'Collateral', 
             'Supply APY', 'Utilization', 'Total Supply (USD)', 
             'Total Borrow (USD)', 'Available Liquidity (USD)', 
-            'Existing Balance (USD)', 'Link To Market', 'Force Exit'
+            'Existing Balance (USD)', 'Lock Allocation', 'Force Exit', 'Link To Market'
         ]],
         column_config={
             "Supply APY": st.column_config.NumberColumn(format="percent"),
@@ -1064,8 +1084,9 @@ if not df_selected.empty:
             "Total Borrow (USD)": st.column_config.NumberColumn(format="dollar"),
             "Available Liquidity (USD)": st.column_config.NumberColumn(format="dollar"),
             "Existing Balance (USD)": st.column_config.NumberColumn(format="dollar", min_value=0.0),
-            "Link To Market": st.column_config.LinkColumn("Link To Market", display_text="Link"),
-            "Force Exit": st.column_config.CheckboxColumn("Force Exit?", help="Check to forcefully sell 100% of this position.", default=False)
+            "Lock Allocation": st.column_config.CheckboxColumn("Lock?", help="If checked, the optimizer will not change this allocation."),
+            "Force Exit": st.column_config.CheckboxColumn("Force Exit?", help="Check to forcefully sell 100% of this position.", default=False),
+            "Link To Market": st.column_config.LinkColumn("Link To Market", display_text="Link")
         },
         disabled=[
             'Market ID', 'Chain', 'Loan Token', 'Collateral', 
@@ -1080,12 +1101,13 @@ if not df_selected.empty:
             'Market ID', 'Chain', 'Loan Token', 'Collateral', 
             'Supply APY', 'Utilization', 'Total Supply (USD)', 
             'Total Borrow (USD)', 'Available Liquidity (USD)', 
-            'Existing Balance (USD)', 'Link To Market', 'Force Exit'
+            'Existing Balance (USD)', 'Lock Allocation', 'Force Exit', 'Link To Market'
         ]
     )
     
-    # Capture Force Exit Selections from the edited dataframe
+    # Capture UI states
     force_exit_map = dict(zip(edited_df['Market ID'], edited_df['Force Exit']))
+    lock_allocation_map = dict(zip(edited_df['Market ID'], edited_df['Lock Allocation']))
 
     current_wealth = sum(st.session_state.balance_cache.get(m_id, 0.0) for m_id in df_selected['Market ID'])
     total_optimizable = current_wealth + new_cash
@@ -1143,23 +1165,19 @@ if not df_selected.empty:
                 "It sacrifices a small amount of APY to ensure you can exit large positions easily without slippage."
             )
 
-# [FIND THIS SECTION]
-# if st.button("🚀 Run Optimization", type="primary", width='stretch'):
-# ...
-
-# [REPLACE WITH THIS BLOCK]
     if st.button("🚀 Run Optimization", type="primary", width='stretch'):
         # 1. Clear State
         if 'hist_demand_df' in st.session_state:
             del st.session_state.hist_demand_df
         
-        # 2. Prepare Data (One Global Fetch First)
+        # 2. Prepare Data
         market_data_list = fetch_live_market_details(df_selected)
         
-        # Inject user data
+        # Inject user data and UI flags
         for m in market_data_list:
             m['existing_balance_usd'] = st.session_state.balance_cache.get(m['Market ID'], 0.0)
             m['force_exit'] = force_exit_map.get(m['Market ID'], False)
+            m['lock_allocation'] = lock_allocation_map.get(m['Market ID'], False) # NEW
 
         # Global Metrics for reference
         current_annual_interest = sum(m['existing_balance_usd'] * m['current_supply_apy'] for m in market_data_list)
