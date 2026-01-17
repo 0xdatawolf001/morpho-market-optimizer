@@ -152,7 +152,7 @@ def get_lifi_quote(from_chain, to_chain, from_token, to_token, amount_atomic, us
     
     # Slippage Ladder
     ladder = [user_slippage_decimal]
-    standard_tiers = [0.0005, 0.001, 0.005, 0.01, 0.05]
+    standard_tiers = [0.0005, 0.001, 0.005, 0.01, 0.05, 0.1]
     
     for tier in standard_tiers:
         if tier > user_slippage_decimal:
@@ -2110,7 +2110,7 @@ if not df_selected.empty:
                 c_an1, c_an2 = st.columns([1, 2])
                 with c_an1:
                     # User inputs Percentage (e.g. 0.5), we convert to decimal (0.005) later
-                    user_slippage_pct = st.number_input("Target Slippage Tolerance (%)", min_value=0.0001, max_value=5.0, value=0.01, step=0.01)
+                    user_slippage_pct = st.number_input("Target Slippage Tolerance (%)", min_value=0.0001, max_value=5.0, value=0.0001)
                     
                 with c_an2:
                     st.write("") # Spacer
