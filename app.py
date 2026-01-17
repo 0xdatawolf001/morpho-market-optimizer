@@ -738,8 +738,8 @@ with st.form("market_filter_form"):
     st.markdown("---")
     # Metric Range Row 1: APY
     r1_c1, r1_c2 = st.columns(2)
-    m_apy_in = r1_c1.number_input("Min APY %", 0.0, 1000.0, 0.0, step=0.5)
-    x_apy_in = r1_c2.number_input("Max APY %", 0.0, 1000.0, 1000.0, step=0.5)
+    m_apy_in = r1_c1.number_input("Min APY %", 0.0, 1000.0, 0.0)
+    x_apy_in = r1_c2.number_input("Max APY %", 0.0, 1000.0, 1000.0)
     
     # Metric Range Row 2: Utilization
     r2_c1, r2_c2 = st.columns(2)
@@ -748,8 +748,8 @@ with st.form("market_filter_form"):
     
     # Metric Row 3: Liquidity Thresholds
     r3_c1, r3_c2 = st.columns(2)
-    m_supply_usd = r3_c1.number_input("Min Total Supply (USD)", 0.0, 10_000_000_000.0, 0.0, step=100000.0)
-    m_avail_usd = r3_c2.number_input("Min Available Liquidity (USD)", 0.0, 10_000_000_000.0, 0.0, step=100000.0)
+    m_supply_usd = r3_c1.number_input("Min Total Supply (USD)", 0.0, 10_000_000_000.0, 0.0)
+    m_avail_usd = r3_c2.number_input("Min Available Liquidity (USD)", 0.0, 10_000_000_000.0, 0.0)
     
     apply_btn = st.form_submit_button("Apply Filters", type="primary", width='stretch')
 
@@ -1007,32 +1007,25 @@ with col_param:
     new_cash = st.number_input(
         "Additional New Cash / Withdrawal (USD)", 
         value=0.0, 
-        step=1000.0,
         help="Positive = Add Capital. Negative = Withdraw. (Distributed proportionally to existing silos)."
     )
 
     max_port_alloc = st.number_input(
         "Max Portfolio Allocation %",
-        min_value=0.01,
-        max_value=100.0,
         value=100.0,
-        step=5.0,
+
         help="Safety limit: No single market can exceed this % of the total portfolio."
     )
 
     max_dominance = st.number_input(
         "Whale Shield: Max Dominance %",
-        min_value=0.001,
-        max_value=1000.0,
         value=30.0,
-        step=5.0,
         help="Liquidity limit: You will never own more than this % of available liquidity."
     )
 
     min_move_thresh = st.number_input(
         "Min Rebalance Threshold ($)", 
         value=0.0, 
-        step=50.0,
         help='The threshold where the optimizer only allocates if it crosses this amount'
     )
 
