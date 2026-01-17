@@ -1700,14 +1700,15 @@ if not df_selected.empty:
         st.divider()
 
 # ==========================================
-        # 5. EXECUTION LOGIC & TABLES
-        # ==========================================
-        
+# 5. EXECUTION LOGIC & TABLES
+# ==========================================
+
         # 2. Operational Split (Rebalance vs Swap vs Bridge)
         st.markdown("#### 📤 Withdrawal Operations Split")
-        st.caption("Breakdown of where your withdrawn funds should go.")
+        st.caption("Breakdown of where funds withdrawn from specific markets are destined to go.")
         
         # --- A. Theoretical Split ---
+        # 1. Calculate Demand (Where money is going)
         chain_capacities = {} 
         token_capacities = {} 
         
@@ -1720,13 +1721,14 @@ if not df_selected.empty:
             token_capacities[(c, t)] = token_capacities.get((c, t), 0.0) + amt
             
         withdraw_logic = []
+        # 2. Process Withdrawals (Where money is coming from) - Market Level
         withdrawals = df_res[df_res['Net Move ($)'] < -0.01].copy()
-        withdrawals = withdrawals.sort_values(['Chain', 'Token'])
-        grouped_withdrawals = withdrawals.groupby(['Chain', 'Token'])['Net Move ($)'].sum().reset_index()
         
-        for _, row in grouped_withdrawals.iterrows():
+        for _, row in withdrawals.iterrows():
             src_chain = row['Chain']
             src_token = row['Token']
+            src_name = row['Market']
+            src_id = row['Destination ID']
             total_moved = abs(row['Net Move ($)'])
             remaining_val = total_moved
             
@@ -1751,25 +1753,27 @@ if not df_selected.empty:
             matched_bridge = remaining_val
             
             withdraw_logic.append({
-                "Source Chain": src_chain,
+                "Source Market": src_name,
+                "Market ID": src_id,
+                "Chain": src_chain,
                 "Asset": src_token,
-                "Total Capital Affected": total_moved,
-                "1. Keep In Chain And Same Asset (Rebalance)": matched_rebalance,
-                "2. Swap Asset But In Same Chain (Internal)": matched_swap,
-                "3. Bridge Out": matched_bridge
+                "Total Withdrawal": total_moved,
+                "1. Internal Rebalance (Same Asset)": matched_rebalance,
+                "2. Internal Swap (Same Chain)": matched_swap,
+                "3. Bridge Out (New Chain)": matched_bridge
             })
             
         if withdraw_logic:
             df_ops = pd.DataFrame(withdraw_logic)
             st.dataframe(
                 df_ops.style.format({
-                    "Total Capital Affected": "${:,.2f}",
-                    "1. Keep In Chain And Same Asset (Rebalance)": "${:,.2f}",
-                    "2. Swap Asset But In Same Chain (Internal)": "${:,.2f}",
-                    "3. Bridge Out": "${:,.2f}"
-                }).applymap(lambda x: 'background-color: #1b5e20; color: white' if x > 0.01 else '', subset=["1. Keep In Chain And Same Asset (Rebalance)"])
-                  .applymap(lambda x: 'background-color: #01579b; color: white' if x > 0.01 else '', subset=["2. Swap Asset But In Same Chain (Internal)"])
-                  .applymap(lambda x: 'background-color: #b71c1c; color: white' if x > 0.01 else '', subset=["3. Bridge Out"]),
+                    "Total Withdrawal": "${:,.2f}",
+                    "1. Internal Rebalance (Same Asset)": "${:,.2f}",
+                    "2. Internal Swap (Same Chain)": "${:,.2f}",
+                    "3. Bridge Out (New Chain)": "${:,.2f}"
+                }).applymap(lambda x: 'background-color: #1b5e20; color: white' if x > 0.01 else '', subset=["1. Internal Rebalance (Same Asset)"])
+                  .applymap(lambda x: 'background-color: #01579b; color: white' if x > 0.01 else '', subset=["2. Internal Swap (Same Chain)"])
+                  .applymap(lambda x: 'background-color: #b71c1c; color: white' if x > 0.01 else '', subset=["3. Bridge Out (New Chain)"]),
                 width='stretch',
                 hide_index=True
             )
