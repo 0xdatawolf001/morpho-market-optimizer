@@ -123,9 +123,14 @@ def to_atomic_units(amount_adjusted: float, decimals: int) -> str:
     Safely converts decimal-adjusted amount to atomic units (string integer).
     Prevents floating point errors by using rounding before casting.
     """
+    # FIX: Explicit check for missing decimals
+    if decimals is None or not isinstance(decimals, (int, float)):
+        raise ValueError("Invalid decimals provided for atomic conversion.")
+        
     if not amount_adjusted or amount_adjusted <= 0:
         return "0"
-    return str(int(round(amount_adjusted * (10**decimals))))
+        
+    return str(int(round(amount_adjusted * (10**int(decimals)))))
 
 def get_lifi_quote(from_chain, to_chain, from_token, to_token, amount_atomic, user_address, user_slippage_decimal):
     url = "https://li.quest/v1/advanced/routes"
@@ -286,6 +291,14 @@ def get_market_dictionary():
         loan = m.get('loanAsset') or {}
         state = m.get('state') or {}
         
+        # FIX: Strict data validation. If loan metadata or price is missing, skip the market.
+        price_usd = loan.get('priceUsd')
+        loan_address = loan.get('address')
+        decimals = loan.get('decimals')
+        
+        if price_usd is None or price_usd <= 0 or not loan_address or decimals is None:
+            continue # Skip markets with "Ghost Data"
+
         def safe_float(value, default=0.0):
             if value is None: return default
             try: return float(value)
@@ -294,17 +307,14 @@ def get_market_dictionary():
         supply_usd = safe_float(state.get('supplyAssetsUsd'))
         borrow_usd = safe_float(state.get('borrowAssetsUsd'))
         
-        # Capture the price from the API
-        price_usd = safe_float(loan.get('priceUsd'), default=1.0)
-        
         processed.append({
             "Market ID": m['uniqueKey'],
             "Chain": CHAIN_ID_TO_NAME.get(loan.get('chain', {}).get('id'), "Other"),
             "Loan Token": loan.get('symbol'),
-            "Loan Address": loan.get('address'), 
+            "Loan Address": loan_address, 
             "Collateral": (m.get('collateralAsset') or {}).get('symbol'),
-            "Decimals": loan.get('decimals'),
-            "Price USD": price_usd,
+            "Decimals": int(decimals),
+            "Price USD": float(price_usd),
             "ChainID": loan.get('chain', {}).get('id'),
             "Supply APY": safe_float(state.get('supplyApy')),
             "Utilization": (safe_float(state.get('borrowAssets')) / safe_float(state.get('supplyAssets'))) if safe_float(state.get('supplyAssets')) > 0 else 0,
@@ -493,12 +503,15 @@ class RebalanceOptimizer:
         simulated_total_supply_wei = base_supply_wei + user_new_wei
         
         # 4. Standard Morpho Math
-        if simulated_total_supply_wei <= 0: 
+        # FIX: If supply is zero or negative, return 0 yield immediately
+        if simulated_total_supply_wei <= 1: 
             return 0.0
         
         new_util = market['raw_borrow'] / simulated_total_supply_wei
         
-        new_mult = compute_curve_multiplier(new_util)
+        # Utilization capped at 100% for the curve multiplier
+        clamped_util = min(1.0, new_util)
+        new_mult = compute_curve_multiplier(clamped_util)
         new_borrow_rate = market['rate_at_target'] * new_mult
         new_supply_rate = new_borrow_rate * new_util * (1 - market['fee'])
         
@@ -578,9 +591,11 @@ class RebalanceOptimizer:
         # Portfolio Cap (USD)
         port_cap_usd = self.total_budget * self.max_port_alloc_ratio
         
-        # Whale Shield Logic
-        if self.max_dominance_ratio >= 0.99:
-            whale_cap_factor = float('inf')
+        # --- FIND: "whale_cap_factor = " inside RebalanceOptimizer.optimize ---
+        # Whale Shield Logic: Fix division by zero if dominance is 100%
+        if self.max_dominance_ratio >= 0.999:
+            # If user allows ~100% dominance, the cap is effectively the full budget
+            whale_cap_factor = 1e12 
         else:
             whale_cap_factor = self.max_dominance_ratio / (1.0 - self.max_dominance_ratio)
 
@@ -1129,7 +1144,11 @@ if not df_selected.empty:
                 "It sacrifices a small amount of APY to ensure you can exit large positions easily without slippage."
             )
 
+    # --- FIND: "if st.button("🚀 Run Optimization"..." ---
     if st.button("🚀 Run Optimization", type="primary", width='stretch'):
+        # FIX: Force a final sync of the portfolio editor before calculating
+        sync_portfolio_edits()
+
         # 1. Clear State
         if 'hist_demand_df' in st.session_state:
             del st.session_state.hist_demand_df
@@ -1200,12 +1219,15 @@ if not df_selected.empty:
             # Calculate Silo Budget
             silo_existing_wealth = sum(m['existing_balance_usd'] for m in silo_markets)
             
+            # FIX: Handle new users where current_wealth is 0
             if current_wealth > 0:
                 share_of_port = silo_existing_wealth / current_wealth
                 silo_budget = silo_existing_wealth + (new_cash * share_of_port)
             else:
-                silo_budget = new_cash / silo_count
+                # If starting from scratch, distribute new cash equally among selected silos
+                silo_budget = new_cash / len(silos)
             
+            # Safety: Prevent negative budgets or tiny dust silos
             if silo_budget <= 0.01:
                 my_bar.progress((i + 1) / silo_count, text=f"Skipping empty silo {key}...")
                 continue
@@ -2134,6 +2156,28 @@ if not df_selected.empty:
                     dummy_wallet = user_wallet if (user_wallet and len(user_wallet) > 10) else "0x0000000000000000000000000000000000000000"
 
                     for i, move in enumerate(complex_moves):
+                        # FIX: Case 7 - Skip if loan addresses are missing to prevent API crash
+                        if not move.get('src_token') or not move.get('dst_token'):
+                            analysis_results.append({
+                                "Signal": "🔴 Incompatible",
+                                "From Market": f"{move['From']} ({move['From (Chain)']})",
+                                "To Market": f"{move['To']} ({move['To (Chain)']})",
+                                "Execution Path": "Missing Token Address in Morpho API",
+                                "Amount In": f"${move['Amount to move ($)']:,.2f}",
+                                "Simulated Out": "$0.00",
+                                "Net ROI (1yr $)": 0,
+                                "Total Cost": "N/A",
+                                "Gas": "$0.00",
+                                "Fees": "$0.00",
+                                "Swap & Impact Cost ($)": "$0.00",
+                                "Slippage Tolerance": "N/A",
+                                "Asset B/E": "N/A",
+                                "Jumper Link": ""
+                            })
+                            prog_bar.progress((i + 1) / len(complex_moves))
+                            continue
+
+                        # This is the existing code that follows the fix
                         token_amt = move['Amount to move ($)'] / move['price'] if move['price'] > 0 else 0
                         atomic_amt = to_atomic_units(token_amt, move['decimals'])
                         
