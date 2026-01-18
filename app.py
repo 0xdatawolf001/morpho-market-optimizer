@@ -24,7 +24,7 @@ SECONDS_PER_YEAR = 31536000
 MAX_RETRIES = 3
 RETRY_BACKOFF = 2 # Seconds
 
-# Chart Performance Constants (NEW)
+# Chart Performance Constants
 MAX_SCATTER_PLOT_POINTS = 5000 # Max points for the Efficiency Frontier plot
 MAX_LINE_PLOT_POINTS_PER_STRATEGY = 1000 # Max points per strategy for the Solver Convergence plot
 DEMAND_TREND_CHART_HEIGHT = 800 # Increased for better vertical visibility
@@ -68,23 +68,6 @@ def extract_market_id_from_monarch_link(text: str) -> str:
         if len(parts) >= 2 and parts[-1].startswith('0x'):
             return parts[-1].lower()
     return text.lower()
-
-def enrich_market_ids(text, df_all):
-    """Adds -- Loan/Collateral labels to raw Market IDs in text."""
-    lines = text.split('\n')
-    enriched_lines = []
-    for line in lines:
-        clean = line.strip()
-        # If it looks like a Market ID and doesn't already have a label/comment
-        if clean.startswith('0x') and '--' not in clean and len(clean) >= 60:
-            row = df_all[df_all['Market ID'].str.lower() == clean.lower()]
-            if not row.empty:
-                loan = row.iloc[0]['Loan Token']
-                coll = row.iloc[0]['Collateral']
-                enriched_lines.append(f"{clean} -- {loan}/{coll}")
-                continue
-        enriched_lines.append(line)
-    return "\n".join(enriched_lines)
 
 def filter_small_moves(allocations, market_data_list, threshold_usd, total_budget):
     """
@@ -132,7 +115,7 @@ def filter_small_moves(allocations, market_data_list, threshold_usd, total_budge
     return cleaned_allocations
 
 # ==========================================
-# 1. MATH HELPERS
+# 2. API HELPERS
 # ==========================================
 
 def to_atomic_units(amount_adjusted: float, decimals: int) -> str:
@@ -163,7 +146,6 @@ def get_lifi_quote(from_chain, to_chain, from_token, to_token, amount_atomic, us
         ladder.insert(0, user_slippage_decimal)
 
     last_error = None
-    print(f"[LI.FI] Starting quote search for {from_token} -> {to_token} with slippage ladder: {ladder}")
 
     # OUTER LOOP: The Slippage Ladder
     for slippage_tier in ladder:
@@ -789,7 +771,6 @@ with col_scope:
         scan_clicked = st.button("Import From Wallet", type="primary", use_container_width=True)
 
     with u_col3:
-        # NEW: Clear All button replaces Clear Wallet Markets
         clear_all_clicked = st.button("Clear All", type="secondary", use_container_width=True)
 
     if "portfolio_input_text" not in st.session_state:
@@ -961,7 +942,6 @@ with col_scope:
 with col_param:
     st.subheader("3. Parameters")
     
-    # NEW: Constraint Dropdown
     rebalance_scope = st.selectbox(
         "Optimization Constraint",
         options=[
@@ -1132,7 +1112,7 @@ if not df_selected.empty:
         if 'hist_demand_df' in st.session_state:
             del st.session_state.hist_demand_df
         
-        # NEW: Reset the demand trend trigger so it doesn't auto-run on new results
+        # Reset the demand trend trigger so it doesn't auto-run on new results
         st.session_state.run_demand_trend = False
         
         # 2. Prepare Data
@@ -1142,7 +1122,7 @@ if not df_selected.empty:
         for m in market_data_list:
             m['existing_balance_usd'] = st.session_state.balance_cache.get(m['Market ID'], 0.0)
             m['force_exit'] = force_exit_map.get(m['Market ID'], False)
-            m['lock_allocation'] = lock_allocation_map.get(m['Market ID'], False) # NEW
+            m['lock_allocation'] = lock_allocation_map.get(m['Market ID'], False)
 
         # Global Metrics for reference
         current_annual_interest = sum(m['existing_balance_usd'] * m['current_supply_apy'] for m in market_data_list)
@@ -1563,7 +1543,6 @@ if not df_selected.empty:
                         lines, selectors, points, rules
                     ).properties(height=DEMAND_TREND_CHART_HEIGHT).interactive()
                     
-                    print(f"[UI] Rendering Demand Trend Chart with height: {DEMAND_TREND_CHART_HEIGHT}px")
                     st.altair_chart(final_chart, use_container_width=True)
                 else:
                     st.info(f"No markets found matching filter: {filter_mode}")
