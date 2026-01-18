@@ -1607,11 +1607,14 @@ if not df_selected.empty:
         total_allocated_usd = 0.0
         total_stuck_usd = 0.0
         
+        # We use total_optimizable as the denominator for both current and target 
+        # to ensure the "Impact" is additive relative to the same portfolio size.
+        
         for i, target_val in enumerate(final_alloc):
             m = market_data_list[i]
             total_allocated_usd += target_val
             
-            # --- UTILIZATION MATH ---
+            # --- MATH HELPERS ---
             token_price = m['Price USD']
             multiplier = 10**m['Decimals']
             user_current = m['existing_balance_usd']
@@ -1624,7 +1627,6 @@ if not df_selected.empty:
             target_wei = (target_val / token_price) * multiplier if token_price > 0 else 0
             base_supply_wei = max(0, m['raw_supply'] - user_existing_wei)
             simulated_total_supply_wei = base_supply_wei + target_wei
-            
             final_util = m['raw_borrow'] / simulated_total_supply_wei if simulated_total_supply_wei > 0 else 0
             
             # --- LIQUIDITY MATH ---
@@ -1659,6 +1661,14 @@ if not df_selected.empty:
             new_apy = current_apy_val if abs(net_move) < 0.01 else opt.simulate_apy(m, target_val)
             new_annual_interest += (target_val * new_apy)
 
+            # --- ADDITIVE APY IMPACT CALCULATION ---
+            # How much did this market contribute to total APY BEFORE rebalance?
+            current_contrib = (user_current / total_optimizable * current_apy_val) if total_optimizable > 0 else 0
+            # How much does it contribute AFTER rebalance?
+            selected_contrib = (target_val / total_optimizable * new_apy) if total_optimizable > 0 else 0
+            # The net change in the portfolio's total APY caused by this specific market.
+            net_apy_impact = selected_contrib - current_contrib
+
             results.append({
                 "Destination ID": str(m['Market ID'])[:7],
                 "Market": f"{m['Loan Token']}/{m['Collateral']}",
@@ -1666,15 +1676,18 @@ if not df_selected.empty:
                 "Chain": m['Chain'], 
                 "Action": action,
                 "Weight": target_val / total_optimizable if total_optimizable > 0 else 0,
-                "Initial Utilization": initial_util,
-                "Final Utilization": final_util,
+                "Net APY Impact": net_apy_impact,
+                "Contribution (Target)": selected_contrib,
+                "Contribution (Current)": current_contrib,
                 "Current ($)": user_current,
                 "Target ($)": target_val,
                 "Net Move ($)": net_move,
-                "Liquid Move ($)": liquid_move,
-                "Stuck Funds ($)": stuck_funds,
                 "Current APY": current_apy_val,
                 "Simulated APY": new_apy,
+                "Initial Utilization": initial_util,
+                "Final Utilization": final_util,
+                "Liquid Move ($)": liquid_move,
+                "Stuck Funds ($)": stuck_funds,
                 "Ann. Yield": target_val * new_apy,
                 "Initial Liq.": current_avail,
                 "Final Liq.": final_available,
@@ -1693,6 +1706,9 @@ if not df_selected.empty:
                 "Chain": "Wallet",
                 "Action": "⚪ HOLD",
                 "Weight": unallocated_cash / total_optimizable if total_optimizable > 0 else 0,
+                "Net APY Impact": 0.0,
+                "Contribution (Target)": 0.0,
+                "Contribution (Current)": 0.0,
                 "Current ($)": 0.0, 
                 "Target ($)": unallocated_cash,
                 "Net Move ($)": 0.0, 
@@ -1706,10 +1722,8 @@ if not df_selected.empty:
         
         df_res = pd.DataFrame(results)
         
-        if total_optimizable > 0:
-            df_res["Contribution to Portfolio APY"] = (df_res["Target ($)"] / total_optimizable) * df_res["Simulated APY"]
-        else:
-            df_res["Contribution to Portfolio APY"] = 0.0
+        # Sort by impact to highlight the most significant moves
+        df_res = df_res.sort_values(by=["Net APY Impact", "Weight"], ascending=[False, False])
         
         current_blended = res_data['current_metrics']['blended_apy']
         current_ann = res_data['current_metrics']['annual_interest']
@@ -1741,11 +1755,18 @@ if not df_selected.empty:
 
         st.divider()
         st.subheader("⚖️ Allocations")
-        df_res = df_res.sort_values(by=["Action", "Weight"], ascending=[False, False])
-        
+
+        # Color formatting for the Impact Column
+        def style_impact(val):
+            color = '#00E676' if val > 0.000001 else '#FF5252' if val < -0.000001 else '#9E9E9E'
+            return f'color: {color}; font-weight: bold'
+
         st.dataframe(
             df_res.style.format({
                 "Weight": "{:.2%}", 
+                "Net APY Impact": "{:+.4%}",
+                "Contribution (Target)": "{:.4%}",
+                "Contribution (Current)": "{:.4%}",
                 "Initial Utilization": "{:.2%}",      
                 "Final Utilization": "{:.2%}",        
                 "Current ($)": "${:,.2f}", 
@@ -1758,17 +1779,21 @@ if not df_selected.empty:
                 "Ann. Yield": "${:,.2f}",
                 "Initial Liq.": "${:,.2f}",
                 "Final Liq.": "${:,.2f}",
-                "% Liq. Share": "{:.2%}",
-                "Contribution to Portfolio APY": "{:.4%}" 
-            }), 
+                "% Liq. Share": "{:.2%}"
+            }).applymap(style_impact, subset=['Net APY Impact']), 
             column_config={
+                "Net APY Impact": st.column_config.NumberColumn(
+                    "Net APY Impact 🚀",
+                    help="The absolute additive change this market provides to your TOTAL Portfolio APY (Selected Contrib - Current Contrib)."
+                ),
                 "Link To Market": st.column_config.LinkColumn("Link To Market", display_text="Link")
             },
             column_order=["Destination ID", "Market", "Chain", "Action", "Weight", 
+                          "Net APY Impact", "Contribution (Target)", "Contribution (Current)",
+                          "Current ($)", "Target ($)", "Net Move ($)", 
+                          "Current APY", "Simulated APY", "Ann. Yield",
                           "Initial Utilization", "Final Utilization", 
-                          "Current ($)", "Target ($)", "Net Move ($)", "Liquid Move ($)", 
-                          "Stuck Funds ($)", "Current APY", "Simulated APY", "Ann. Yield", 
-                          "Initial Liq.", "Final Liq.", "% Liq. Share", "Contribution to Portfolio APY", "Link To Market"],
+                          "Initial Liq.", "Final Liq.", "% Liq. Share", "Link To Market"],
             width='stretch', 
             hide_index=True
         )
