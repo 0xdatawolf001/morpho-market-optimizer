@@ -1379,7 +1379,23 @@ if not df_selected.empty:
                 tooltip=['Type', 'Blended APY', 'Diversity Score']
             )
             
-            st.altair_chart(base + points, width='stretch')
+            if not df_scatter.empty and len(df_scatter['Type'].unique()) > 0:
+                base = alt.Chart(df_scatter).mark_circle(opacity=0.3, color='#80DEEA').encode(
+                    x=alt.X('Diversity Score', title='Diversity (1 - HHI)'),
+                    y=alt.Y('Blended APY', title='APY', axis=alt.Axis(format='%')),
+                    tooltip=['Diversity Score', 'Blended APY', 'Annual Yield ($)']
+                )
+                
+                points = alt.Chart(highlights).mark_circle(size=200, opacity=1.0).encode(
+                    x='Diversity Score',
+                    y='Blended APY',
+                    color=alt.Color('Type', scale=alt.Scale(domain=STRAT_DOMAIN, range=STRAT_RANGE)),
+                    tooltip=['Type', 'Blended APY', 'Diversity Score']
+                )
+                
+                st.altair_chart(base + points, width='stretch')
+            else:
+                st.info("Not enough data to generate optimization charts. Please add capital or select more markets.")
 
         with col_graph2:
             st.markdown("**Solver Convergence**")
