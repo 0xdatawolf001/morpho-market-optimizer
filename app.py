@@ -1011,7 +1011,19 @@ if not df_selected.empty:
                         val = 0.0
                     st.session_state.balance_cache[m_id] = val
 
-    # Locate and replace the full st.data_editor block
+# 1. Visual Tip for the User (Pastel Green Theme)
+    st.markdown(
+        """
+        <div style="background-color: #e1f5fe; padding: 10px; border-radius: 5px; border-left: 5px solid #4caf50; margin-bottom: 10px;">
+            <strong>ℹ️ Portfolio Tip:</strong> Please fill in your current holdings in the 
+            <span style="color: #2e7d32; font-weight: bold;">Existing Balance (USD) 🟢</span> 
+            column below if they were not automatically imported from your wallet. Or you can use it to simulate.
+        </div>
+        """, 
+        unsafe_allow_html=True
+    )
+
+    # 2. Tightened Data Editor
     edited_df = st.data_editor(
         df_selected[[
             'Market ID', 'Chain', 'Loan Token', 'Collateral', 
@@ -1020,15 +1032,25 @@ if not df_selected.empty:
             'Existing Balance (USD)', 'Lock Allocation', 'Force Exit', 'Link To Market'
         ]],
         column_config={
-            "Supply APY": st.column_config.NumberColumn(format="percent"),
-            "Utilization": st.column_config.NumberColumn(format="percent"),
-            "Total Supply (USD)": st.column_config.NumberColumn(format="dollar"),
-            "Total Borrow (USD)": st.column_config.NumberColumn(format="dollar"),
-            "Available Liquidity (USD)": st.column_config.NumberColumn(format="dollar"),
-            "Existing Balance (USD)": st.column_config.NumberColumn(format="dollar", min_value=0.0),
-            "Lock Allocation": st.column_config.CheckboxColumn("Lock?", help="If checked, the optimizer will not change this allocation."),
-            "Force Exit": st.column_config.CheckboxColumn("Force Exit?", help="Check to forcefully sell 100% of this position.", default=False),
-            "Link To Market": st.column_config.LinkColumn("Link To Market", display_text="Link")
+            "Market ID": st.column_config.TextColumn(width=100),
+            "Chain": st.column_config.TextColumn(width=80),
+            "Loan Token": st.column_config.TextColumn(width=80),
+            "Collateral": st.column_config.TextColumn(width=80),
+            "Supply APY": st.column_config.NumberColumn(format="percent", width=70),
+            "Utilization": st.column_config.NumberColumn(format="percent", width=70),
+            "Total Supply (USD)": st.column_config.NumberColumn(format="dollar", width=100),
+            "Total Borrow (USD)": st.column_config.NumberColumn(format="dollar", width=100),
+            "Available Liquidity (USD)": st.column_config.NumberColumn(format="dollar", width=100),
+            "Existing Balance (USD)": st.column_config.NumberColumn(
+                "Existing Balance (USD) 🟢", 
+                help="Fill in your current market balance here. The optimizer uses this to calculate rebalance moves.",
+                format="dollar", 
+                min_value=0.0,
+                width=150
+            ),
+            "Lock Allocation": st.column_config.CheckboxColumn("Lock Allocation", help="If checked, the optimizer will not change this allocation.", width=100),
+            "Force Exit": st.column_config.CheckboxColumn("Force Exit?", help="Check to forcefully sell 100% of this position.", default=False, width=100),
+            "Link To Market": st.column_config.LinkColumn("Link To Market", display_text="Link", width=100)
         },
         disabled=[
             'Market ID', 'Chain', 'Loan Token', 'Collateral', 
