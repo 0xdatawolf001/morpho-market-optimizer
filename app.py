@@ -2122,11 +2122,14 @@ if not df_selected.empty:
                                 elif hours < 24: asset_breakeven_str = f"{hours:.1f} hrs"
                                 else: asset_breakeven_str = f"{hours/24:.1f} days"
                             
-                            # Signal Logic
-                            if net_roi_usd < 0: signal = "🔴 Negative ROI"
-                            elif hours < 24: signal = "🟢 Strong"
-                            elif hours < 168: signal = "🟡 Slow"
-                            else: signal = "🟠 Marginal"
+                            if net_roi_usd < 0: 
+                                signal = "🔴 Negative ROI"
+                            elif hours < 24: 
+                                signal = "🟢 Strong"
+                            elif hours < 168: 
+                                signal = "🟡 Marginal"
+                            else: 
+                                signal = "🟠 Slow"
                             
                         link = f"https://jumper.exchange/?fromChain={move['src_chain_id']}&fromToken={move['src_token']}&toChain={move['dst_chain_id']}&toToken={move['dst_token']}&fromAmount={token_amt}"
                         
@@ -2154,6 +2157,14 @@ if not df_selected.empty:
                         st.dataframe(
                             pd.DataFrame(analysis_results),
                             column_config={
+                                "Signal": st.column_config.TextColumn(
+                                    help=(
+                                        "🟢 Strong: Breaks even < 24h\n\n"
+                                        "🟡 Marginal: Breaks even in 1-7 days\n\n"
+                                        "🟠 Slow: Breaks even in > 7 days\n\n"
+                                        "🔴 Negative ROI: Costs exceed 1-year yield gain"
+                                    )
+                                ),
                                 "Execution Path": st.column_config.TextColumn(help="DEXs and Bridges used.", width="medium"),
                                 "Net ROI (1yr $)": st.column_config.NumberColumn(
                                     help="Expected 1-year yield gain from this move minus the total execution costs.",
