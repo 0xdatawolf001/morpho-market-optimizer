@@ -1029,7 +1029,7 @@ if not df_selected.empty:
 # 1. Visual Tip for the User (Pastel Green Theme)
     st.markdown(
         """
-        <div style="background-color: #e1f5fe; padding: 10px; border-radius: 5px; border-left: 5px solid #4caf50; margin-bottom: 10px;">
+        <div style="background-color: transparent; padding: 10px; border-radius: 5px; border-left: 5px solid #4caf50; margin-bottom: 10px;">
             <strong>ℹ️ Portfolio Tip:</strong> Please fill in your current holdings in the 
             <span style="color: #2e7d32; font-weight: bold;">Existing Balance (USD) 🟢</span> 
             column below if they were not automatically imported from your wallet. Or you can use it to simulate.
@@ -2291,6 +2291,9 @@ if not df_selected.empty:
                         })
                         prog_bar.progress((i + 1) / len(complex_moves))
                     
+                    # ==========================================
+# REPLACEMENT BLOCK: LI.FI ANALYSIS RESULT PROCESSING
+# ==========================================
                     prog_bar.empty()
                     
                     if analysis_results:
@@ -2324,18 +2327,26 @@ if not df_selected.empty:
                         )
 
                         # --- NEW SECTION: Portfolio Level Summary ---
-                        # Calculate Global Break Even based on 'interest_diff' (Annual Interest Gain calculated earlier)
+                        # Logic: Calculate break-even based on the TOTAL projected yield of the new strategy
                         if grand_total_cost > 0:
-                            if interest_diff > 0:
-                                hours_to_breakeven = grand_total_cost / (interest_diff / 8760)
+                            if new_annual_interest > 0:
+                                # (Total Cost) / (Total Annual Yield / Hours in Year)
+                                hours_to_breakeven = grand_total_cost / (new_annual_interest / 8760)
+                                
                                 if hours_to_breakeven < 24:
                                     time_str = f"{hours_to_breakeven:.1f} Hours"
                                 else:
                                     time_str = f"{hours_to_breakeven/24:.1f} Days"
                                 
-                                st.info(f"💰 **Total Execution Cost:** ${grand_total_cost:,.2f}  |  ⏳ **Portfolio Break-Even:** {time_str} (based on total annual interest gain of ${interest_diff:,.2f})")
+                                # Simplified string to fix rendering artifacts
+                                summary_msg = (
+                                    f"💰 Total Execution Cost: ${grand_total_cost:,.2f}  |  "
+                                    f"⏳ Portfolio Break-Even: {time_str} "
+                                    f"(based on total annual interest of ${new_annual_interest:,.2f})"
+                                )
+                                st.info(summary_msg)
                             else:
-                                st.warning(f"💰 **Total Execution Cost:** ${grand_total_cost:,.2f}. Warning: This rebalance does not increase Annual Yield, so costs will not be recovered via interest.")
+                                st.warning(f"💰 Total Execution Cost: ${grand_total_cost:,.2f}. Note: Strategy yield is $0, costs cannot be recovered.")
             else:
                 st.info("No cross-chain or swap moves detected in this plan. Costs are negligible.")
             
