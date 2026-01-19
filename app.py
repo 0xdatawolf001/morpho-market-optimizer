@@ -1947,6 +1947,21 @@ if not df_selected.empty:
         # Enrich source data
         withdraw_df = df_res[df_res["Liquid Move ($)"] < -0.01]
         for _, row in withdraw_df.iterrows():
+            
+            # Safe Lookup for Decimals and Address
+            # Because 'df_res' contains calculated rows, we must ensure we grab metadata safely
+            try:
+                m_row = st.session_state.market_dict[st.session_state.market_dict['Market ID'] == row['Market ID Full']]
+                if not m_row.empty:
+                    dec_val = int(m_row.iloc[0]['Decimals'])
+                    tok_addr = row.get('Loan Address') or m_row.iloc[0]['Loan Address']
+                else:
+                    dec_val = 18 # Default Fallback
+                    tok_addr = row.get('Loan Address')
+            except Exception:
+                dec_val = 18
+                tok_addr = row.get('Loan Address')
+
             item = {
                 "id": row['Market ID Full'],
                 "name": row['Market'],
@@ -1957,8 +1972,8 @@ if not df_selected.empty:
                 "type": "Market",
                 # Metadata
                 "chain_id": row.get('ChainID'),
-                "token_address": row.get('Loan Address', None) or st.session_state.market_dict[st.session_state.market_dict['Market ID'] == row['Market ID Full']].iloc[0]['Loan Address'],
-                "decimals": st.session_state.market_dict[st.session_state.market_dict['Market ID'] == row['Market ID Full']].iloc[0]['Decimals'],
+                "token_address": tok_addr,
+                "decimals": dec_val,
                 "price": row.get('Price USD', 1.0)
             }
             all_sources.append(item)
@@ -1974,6 +1989,13 @@ if not df_selected.empty:
         all_destinations = []
         deposit_df = df_res[df_res["Net Move ($)"] > 0.01]
         for _, row in deposit_df.iterrows():
+            # Destination Lookup
+            try:
+                m_row = st.session_state.market_dict[st.session_state.market_dict['Market ID'] == row['Market ID Full']]
+                tok_addr = row.get('Loan Address') or (m_row.iloc[0]['Loan Address'] if not m_row.empty else None)
+            except:
+                tok_addr = None
+
             all_destinations.append({
                 "id": row['Market ID Full'],
                 "name": row['Market'],
@@ -1983,7 +2005,7 @@ if not df_selected.empty:
                 "running_balance": row['Current ($)'],
                 # Metadata
                 "chain_id": row.get('ChainID'),
-                "token_address": row.get('Loan Address', None) or st.session_state.market_dict[st.session_state.market_dict['Market ID'] == row['Market ID Full']].iloc[0]['Loan Address'],
+                "token_address": tok_addr,
                 "apy": row.get('Simulated APY', 0.0)
             })
 
@@ -2055,7 +2077,10 @@ if not df_selected.empty:
                         op_type, op_code = "2. Swap", 2
                     else:
                         op_type, op_code = "1. Rebalance", 1
-                        
+                    
+                    # FIX: Enforce Integer for decimals
+                    safe_decimals = int(src.get('decimals') or 18)
+
                     transfer_steps.append({
                         "Ordering": ordering_counter,
                         "Operation Type": op_type, "OpCode": op_code,
@@ -2068,7 +2093,8 @@ if not df_selected.empty:
                         # Metadata for LI.FI
                         "src_chain_id": src.get('chain_id'), "dst_chain_id": dst.get('chain_id'),
                         "src_token": src.get('token_address'), "dst_token": dst.get('token_address'),
-                        "decimals": src.get('decimals', 18), "price": src.get('price', 1.0), "dst_apy": dst.get('apy', 0.0)
+                        "decimals": safe_decimals, 
+                        "price": src.get('price', 1.0), "dst_apy": dst.get('apy', 0.0)
                     })
                     ordering_counter += 1
                     
@@ -2140,8 +2166,9 @@ if not df_selected.empty:
                     # User inputs Percentage (e.g. 0.5), we convert to decimal (0.005) later
                     user_slippage_pct = st.number_input(
                         "Target Slippage Tolerance (%)", 
+                        min_value = 0.0001,
                         value=0.0001, 
-                        format="%.6f"
+                        format="%.4f"
                     )
                     
                 with c_an2:
@@ -2151,18 +2178,19 @@ if not df_selected.empty:
 
                 if run_analysis:
                     analysis_results = []
+                    grand_total_cost = 0.0 # <--- NEW: Accumulator for total costs
                     prog_bar = st.progress(0, text=f"Analyzing {len(complex_moves)} individual moves via LI.FI...")
                     
                     dummy_wallet = user_wallet if (user_wallet and len(user_wallet) > 10) else "0x0000000000000000000000000000000000000000"
 
                     for i, move in enumerate(complex_moves):
-                        # FIX: Case 7 - Skip if loan addresses are missing to prevent API crash
-                        if not move.get('src_token') or not move.get('dst_token'):
+                        # FIX: Validation Check - If token addresses or decimals are missing, skip to avoid API crash
+                        if not move.get('src_token') or not move.get('dst_token') or move.get('decimals') is None:
                             analysis_results.append({
                                 "Signal": "🔴 Incompatible",
                                 "From Market": f"{move['From']} ({move['From (Chain)']})",
                                 "To Market": f"{move['To']} ({move['To (Chain)']})",
-                                "Execution Path": "Missing Token Address in Morpho API",
+                                "Execution Path": "Missing Token Address/Decimals in Morpho API",
                                 "Amount In": f"${move['Amount to move ($)']:,.2f}",
                                 "Simulated Out": "$0.00",
                                 "Net ROI (1yr $)": 0,
@@ -2177,9 +2205,13 @@ if not df_selected.empty:
                             prog_bar.progress((i + 1) / len(complex_moves))
                             continue
 
-                        # This is the existing code that follows the fix
                         token_amt = move['Amount to move ($)'] / move['price'] if move['price'] > 0 else 0
-                        atomic_amt = to_atomic_units(token_amt, move['decimals'])
+                        
+                        # Safe conversion using the sanitized 'decimals'
+                        try:
+                            atomic_amt = to_atomic_units(token_amt, move['decimals'])
+                        except ValueError:
+                             atomic_amt = "0"
                         
                         quote_res = get_lifi_quote(
                             move['src_chain_id'],
@@ -2210,6 +2242,7 @@ if not df_selected.empty:
 
                         if quote_res['success']:
                             total_cost = quote_res['total_cost']
+                            grand_total_cost += total_cost # <--- NEW: Add to global total
                             net_roi_usd = annual_interest_gain - total_cost
                             
                             cost_display = f"${total_cost:.2f}"
@@ -2218,7 +2251,7 @@ if not df_selected.empty:
                             slip_display = f"${quote_res['swap_and_impact_cost']:.2f}"
                             amt_in_display = f"${quote_res['amount_in']:,.2f}"
                             amt_out_display = f"${quote_res['amount_out']:,.2f}"
-                            slippage_tolerance_display = f"{quote_res['ladder_tier_used']*100:.6f}%"
+                            slippage_tolerance_display = f"{quote_res['ladder_tier_used']*100:.4f}%"
                             execution_path_display = quote_res['execution_path']
 
                             # Asset Break-even
@@ -2289,6 +2322,20 @@ if not df_selected.empty:
                             hide_index=True,
                             use_container_width=True
                         )
+
+                        # --- NEW SECTION: Portfolio Level Summary ---
+                        # Calculate Global Break Even based on 'interest_diff' (Annual Interest Gain calculated earlier)
+                        if grand_total_cost > 0:
+                            if interest_diff > 0:
+                                hours_to_breakeven = grand_total_cost / (interest_diff / 8760)
+                                if hours_to_breakeven < 24:
+                                    time_str = f"{hours_to_breakeven:.1f} Hours"
+                                else:
+                                    time_str = f"{hours_to_breakeven/24:.1f} Days"
+                                
+                                st.info(f"💰 **Total Execution Cost:** ${grand_total_cost:,.2f}  |  ⏳ **Portfolio Break-Even:** {time_str} (based on total annual interest gain of ${interest_diff:,.2f})")
+                            else:
+                                st.warning(f"💰 **Total Execution Cost:** ${grand_total_cost:,.2f}. Warning: This rebalance does not increase Annual Yield, so costs will not be recovered via interest.")
             else:
                 st.info("No cross-chain or swap moves detected in this plan. Costs are negligible.")
             
