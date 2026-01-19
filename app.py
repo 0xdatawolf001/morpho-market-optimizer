@@ -591,33 +591,38 @@ class RebalanceOptimizer:
         # Portfolio Cap (USD)
         port_cap_usd = self.total_budget * self.max_port_alloc_ratio
         
-        # --- FIND: "whale_cap_factor = " inside RebalanceOptimizer.optimize ---
-        # Whale Shield Logic: Fix division by zero if dominance is 100%
+        # Whale Shield Logic
         if self.max_dominance_ratio >= 0.999:
-            # If user allows ~100% dominance, the cap is effectively the full budget
             whale_cap_factor = 1e12 
         else:
             whale_cap_factor = self.max_dominance_ratio / (1.0 - self.max_dominance_ratio)
 
         for m in self.markets:
             current_bal = m.get('existing_balance_usd', 0.0)
-
-            # A. PRIORITY 1: LOCK ALLOCATION
-            if m.get('lock_allocation', False):
-                standard_bounds.append((current_bal, current_bal))
-                whale_bounds.append((current_bal, current_bal))
-                continue
-
-            # B. PRIORITY 2: FORCE EXIT
-            if m.get('force_exit', False):
-                standard_bounds.append((0.0, 0.0))
-                whale_bounds.append((0.0, 0.0))
-                continue
-
-            # C. STANDARD BOUNDS
-            standard_bounds.append((0.0, min(self.total_budget, port_cap_usd)))
             
-            # D. WHALE BOUNDS
+            # --- DEFINE BOUNDS ---
+            # Default: 0 to (Budget or Cap)
+            std_lower = 0.0
+            std_upper = min(self.total_budget, port_cap_usd)
+            
+            # 1. Force Exit (Highest Priority)
+            if m.get('force_exit', False):
+                std_lower = 0.0
+                std_upper = 0.0
+            else:
+                # 2. Prevent Outflows (Cannot sell/withdraw) -> Floor is Current Balance
+                if m.get('prevent_outflows', False):
+                    std_lower = current_bal
+                
+                # 3. Prevent Inflows (Cannot buy/deposit) -> Ceiling is Current Balance
+                if m.get('prevent_inflows', False):
+                    # Note: If current balance > port_cap, we stick to current balance (hold)
+                    std_upper = current_bal
+
+            # Apply Logic to Lists
+            standard_bounds.append((std_lower, std_upper))
+            
+            # Whale Bounds Logic (Same logic, but upper bound constrained by liquidity shield)
             token_price = m.get('Price USD', 0)
             multiplier = 10**m.get('Decimals', 18)
             user_existing_wei = (current_bal / token_price) * multiplier if token_price > 0 else 0
@@ -629,22 +634,35 @@ class RebalanceOptimizer:
             base_available_usd = (base_available_wei / multiplier) * token_price if token_price > 0 else 0
             
             liq_shield_cap = base_available_usd * whale_cap_factor
-            whale_bounds.append((0.0, min(self.total_budget, port_cap_usd, liq_shield_cap)))
+            
+            # Whale upper is minimum of: Standard Upper (which accounts for locks) OR Liquidity Shield
+            # However, if 'Prevent Outflows' is ON, we must respect the floor (std_lower) even if it violates whale shield.
+            whale_upper = min(std_upper, liq_shield_cap)
+            
+            # Safety: If floor > ceiling (e.g. Shield says max $500, but we prevent outflow at $1000), 
+            # we must respect the explicit user lock ("Prevent Outflows").
+            if std_lower > whale_upper:
+                whale_upper = std_lower
+                
+            whale_bounds.append((std_lower, whale_upper))
 
-        # Starting guess: Try to respect bounds immediately for speed
+        # Starting guess logic (unchanged essentially, just using new bounds)
         x0 = np.zeros(n)
         remaining_budget = self.total_budget
         
-        # First, assign locked/force-exit values to x0
+        # Pre-fill fixed slots
         for i, b in enumerate(standard_bounds):
             if b[0] == b[1]: 
                 x0[i] = b[0]
                 remaining_budget -= b[0]
         
-        # Distribute remainder to non-fixed markets
         fixed_mask = np.array([b[0] == b[1] for b in standard_bounds])
         if not all(fixed_mask):
-            x0[~fixed_mask] = max(0, remaining_budget) / np.sum(~fixed_mask)
+            # Distribute remainder safely
+            active_count = np.sum(~fixed_mask)
+            if active_count > 0:
+                dist_amount = max(0, remaining_budget) / active_count
+                x0[~fixed_mask] = dist_amount
 
         constraints = ({'type': 'eq', 'fun': lambda x: np.sum(x) - self.total_budget})
         options = {'maxiter': 5000, 'ftol': 1e-6}
@@ -1003,8 +1021,12 @@ if not df_selected.empty:
     # 2. Add Toggle Columns
     if 'Force Exit' not in df_selected:
         df_selected['Force Exit'] = False
-    if 'Lock Allocation' not in df_selected:
-        df_selected['Lock Allocation'] = False
+    
+    # NEW: Split Lock into Outflow/Inflow controls
+    if 'Prevent Outflows' not in df_selected:
+        df_selected['Prevent Outflows'] = False
+    if 'Prevent Inflows' not in df_selected:
+        df_selected['Prevent Inflows'] = False
 
     # Add the URL column
     df_selected['Link To Market'] = df_selected.apply(
@@ -1038,13 +1060,13 @@ if not df_selected.empty:
         unsafe_allow_html=True
     )
 
-    # 2. Tightened Data Editor
+# 2. Tightened Data Editor
     edited_df = st.data_editor(
         df_selected[[
             'Market ID', 'Chain', 'Loan Token', 'Collateral', 
             'Supply APY', 'Utilization', 'Total Supply (USD)', 
             'Total Borrow (USD)', 'Available Liquidity (USD)', 
-            'Existing Balance (USD)', 'Lock Allocation', 'Force Exit', 'Link To Market'
+            'Existing Balance (USD)', 'Prevent Outflows', 'Prevent Inflows', 'Force Exit', 'Link To Market'
         ]],
         column_config={
             "Market ID": st.column_config.TextColumn(width=100),
@@ -1063,9 +1085,20 @@ if not df_selected.empty:
                 min_value=0.0,
                 width=150
             ),
-            "Lock Allocation": st.column_config.CheckboxColumn("Lock Allocation", help="If checked, the optimizer will not change this allocation.", width=100),
-            "Force Exit": st.column_config.CheckboxColumn("Force Exit?", help="Check to forcefully sell 100% of this position.", default=False, width=100),
-            "Link To Market": st.column_config.LinkColumn("Link To Market", display_text="Link", width=100)
+            "Prevent Outflows": st.column_config.CheckboxColumn(
+                "No Outflows 🔒", 
+                help="If checked, the optimizer will NEVER sell or withdraw funds from this market (Hold or Buy only).", 
+                default=False, 
+                width=90
+            ),
+            "Prevent Inflows": st.column_config.CheckboxColumn(
+                "No Inflows 🛑", 
+                help="If checked, the optimizer will NEVER add new funds to this market (Hold or Sell only).", 
+                default=False, 
+                width=90
+            ),
+            "Force Exit": st.column_config.CheckboxColumn("Force Exit?", help="Check to forcefully sell 100% of this position.", default=False, width=80),
+            "Link To Market": st.column_config.LinkColumn("Link To Market", display_text="Link", width=80)
         },
         disabled=[
             'Market ID', 'Chain', 'Loan Token', 'Collateral', 
@@ -1080,13 +1113,15 @@ if not df_selected.empty:
             'Market ID', 'Chain', 'Loan Token', 'Collateral', 
             'Supply APY', 'Utilization', 'Total Supply (USD)', 
             'Total Borrow (USD)', 'Available Liquidity (USD)', 
-            'Existing Balance (USD)', 'Lock Allocation', 'Force Exit', 'Link To Market'
+            'Existing Balance (USD)', 'Prevent Outflows', 'Prevent Inflows', 'Force Exit', 'Link To Market'
         ]
     )
     
     # Capture UI states
     force_exit_map = dict(zip(edited_df['Market ID'], edited_df['Force Exit']))
-    lock_allocation_map = dict(zip(edited_df['Market ID'], edited_df['Lock Allocation']))
+    # Update maps for new columns
+    prevent_out_map = dict(zip(edited_df['Market ID'], edited_df['Prevent Outflows']))
+    prevent_in_map = dict(zip(edited_df['Market ID'], edited_df['Prevent Inflows']))
 
     current_wealth = sum(st.session_state.balance_cache.get(m_id, 0.0) for m_id in df_selected['Market ID'])
     total_optimizable = current_wealth + new_cash
@@ -1163,7 +1198,9 @@ if not df_selected.empty:
         for m in market_data_list:
             m['existing_balance_usd'] = st.session_state.balance_cache.get(m['Market ID'], 0.0)
             m['force_exit'] = force_exit_map.get(m['Market ID'], False)
-            m['lock_allocation'] = lock_allocation_map.get(m['Market ID'], False)
+            # Inject new split constraints
+            m['prevent_outflows'] = prevent_out_map.get(m['Market ID'], False)
+            m['prevent_inflows'] = prevent_in_map.get(m['Market ID'], False)
 
         # Global Metrics for reference
         current_annual_interest = sum(m['existing_balance_usd'] * m['current_supply_apy'] for m in market_data_list)
