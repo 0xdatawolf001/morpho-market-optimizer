@@ -723,8 +723,8 @@ with st.form("market_filter_form"):
     st.markdown("---")
     # Metric Range Row 1: APY
     r1_c1, r1_c2 = st.columns(2)
-    m_apy_in = r1_c1.number_input("Min APY %", 0.0, 1000.0, 0.0)
-    x_apy_in = r1_c2.number_input("Max APY %", 0.0, 1000.0, 1000.0)
+    m_apy_in = r1_c1.number_input("Min APY %", 0.0, 1000000.0, 0.0)
+    x_apy_in = r1_c2.number_input("Max APY %", 0.0, 1000000.0, 1000.0)
     
     # Metric Range Row 2: Utilization
     r2_c1, r2_c2 = st.columns(2)
