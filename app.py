@@ -1692,58 +1692,78 @@ if not df_selected.empty:
             m = market_data_list[i]
             total_allocated_usd += target_val
             
-            # --- MATH HELPERS ---
+            # --- BASIC METADATA ---
             token_price = m['Price USD']
             multiplier = 10**m['Decimals']
             user_current = m['existing_balance_usd']
+            current_avail_usd = m.get('Available Liquidity (USD)', 0.0)
+            current_apy_val = m.get('current_supply_apy', 0.0)
             
-            # 1. Utilization Math
-            initial_util = m['raw_borrow'] / m['raw_supply'] if m['raw_supply'] > 0 else 0
+            # --- 1. LIQUIDITY & REALIZATION LOGIC ---
+            # Determine how much we actually moved
+            net_move_usd = target_val - user_current
+            requested_withdrawal = max(0, -net_move_usd)
+            
+            # If we want to withdraw more than available, we are stuck
+            stuck_funds_usd = max(0, requested_withdrawal - current_avail_usd)
+            actual_withdrawable_usd = requested_withdrawal - stuck_funds_usd
+            
+            # Realized move is the actual deposit OR the allowed withdrawal
+            liquid_move_usd = -actual_withdrawable_usd if net_move_usd < 0 else net_move_usd
+            realized_target_val = user_current + liquid_move_usd
+            total_stuck_usd += stuck_funds_usd
+            
+            # --- 2. FINAL STATE CALCULATIONS (BASED ON REALIZED BALANCE) ---
+            # Base Supply = Total Supply - User's Current Holdings
             user_existing_wei = (user_current / token_price) * multiplier if token_price > 0 else 0
-            target_wei = (target_val / token_price) * multiplier if token_price > 0 else 0
             base_supply_wei = max(0, m['raw_supply'] - user_existing_wei)
-            simulated_total_supply_wei = base_supply_wei + target_wei
-            final_util = m['raw_borrow'] / simulated_total_supply_wei if simulated_total_supply_wei > 0 else 0
             
-            # 2. Liquidity & Realization Math
-            current_avail = m.get('Available Liquidity (USD)', 0.0)
-            base_available = max(0, current_avail - user_current)
-            final_available = base_available + target_val
-            liq_share = target_val / final_available if final_available > 0 else 0
+            # Realized State: Uses the balance we actually HAVE in the market
+            realized_target_wei = (realized_target_val / token_price) * multiplier if token_price > 0 else 0
+            simulated_realized_supply_wei = base_supply_wei + realized_target_wei
+            final_util = m['raw_borrow'] / simulated_realized_supply_wei if simulated_realized_supply_wei > 0 else 0
             
-            net_move = target_val - user_current
-            requested_withdrawal = max(0, -net_move)
-            stuck_funds = max(0, requested_withdrawal - current_avail)
-            actual_withdrawable = requested_withdrawal - stuck_funds
-            liquid_move = -actual_withdrawable if net_move < 0 else net_move
-            realized_target_val = user_current + liquid_move
-            total_stuck_usd += stuck_funds
+            # Final Liquidity = What's there now + our change in balance
+            # (If we are stuck, liquid_move_usd is 0, so Final Liq == Initial Liq)
+            base_available_usd = max(0, current_avail_usd - user_current)
+            final_available_usd = base_available_usd + realized_target_val
+            liq_share = realized_target_val / final_available_usd if final_available_usd > 0 else 0
             
-            # 3. Action Logic
-            if net_move > 0.01:
+            # --- 3. APY & APR (REALIZED) ---
+            # If no move happened (stuck or hold), rate is exactly current market rate
+            if abs(liquid_move_usd) < 0.01:
+                realized_apy = current_apy_val
+            else:
+                realized_apy = opt.simulate_apy(m, realized_target_val)
+            
+            realized_rate_sec = apy_to_rate_per_second(realized_apy)
+            realized_apr = realized_rate_sec * SECONDS_PER_YEAR
+            
+            # --- 4. TARGET STATE (THEORETICAL FOR OPTIMIZER CONTEXT) ---
+            # We keep this so the user can see what the Optimizer "Wanted"
+            target_apy = current_apy_val if abs(net_move_usd) < 0.01 else opt.simulate_apy(m, target_val)
+            
+            # --- 5. AGGREGATES & ACTION ---
+            if net_move_usd > 0.01:
                 action = "🟢 DEPOSIT"
-            elif net_move < -0.01:
-                action = "⚠️ STUCK" if actual_withdrawable <= 0.01 else "🔴 WITHDRAW"
+            elif net_move_usd < -0.01:
+                action = "⚠️ STUCK" if actual_withdrawable_usd <= 0.01 else "🔴 WITHDRAW"
             else:
                 action = "⚪ HOLD"
 
-            # 4. APY & APR Calculations
-            current_apy_val = m.get('current_supply_apy', 0.0)
-            new_apy = current_apy_val if abs(net_move) < 0.01 else opt.simulate_apy(m, target_val)
-            rate_sec = apy_to_rate_per_second(new_apy)
-            sim_apr = rate_sec * SECONDS_PER_YEAR
-            
-            # 5. Contribution & Totals
             current_contrib = (user_current / total_optimizable * current_apy_val) if total_optimizable > 0 else 0
-            selected_contrib = (target_val / total_optimizable * new_apy) if total_optimizable > 0 else 0
+            # Target contribution uses theoretical APY
+            selected_contrib = (target_val / total_optimizable * target_apy) if total_optimizable > 0 else 0
             net_apy_impact = selected_contrib - current_contrib
             
-            theoretical_annual_interest += (target_val * new_apy)
-            realized_interest_item = (realized_target_val * new_apy)
+            theoretical_annual_interest += (target_val * target_apy)
+            
+            # Interest derived from what actually happened
+            realized_interest_item = (realized_target_val * realized_apy)
             realized_annual_interest += realized_interest_item
-            realized_annual_apr_interest += (realized_target_val * sim_apr)
+            realized_annual_apr_interest += (realized_target_val * realized_apr)
 
-            # --- CONSTRUCT DICTIONARY AS REQUESTED ---
+            # --- 6. CONSTRUCT DICTIONARY ---
             results.append({
                 "Destination ID": str(m['Market ID'])[:7],
                 "Market": f"{m['Loan Token']}/{m['Collateral']}",
@@ -1756,19 +1776,19 @@ if not df_selected.empty:
                 "Contribution (Current)": current_contrib,
                 "Current ($)": user_current,
                 "Target ($)": target_val,
-                "Realized ($)": realized_target_val, # Kept from New Code
-                "Net Move ($)": net_move,
+                "Realized ($)": realized_target_val,
+                "Net Move ($)": net_move_usd,
                 "Current APY": current_apy_val,
-                "Simulated APY": new_apy,
-                "Simulated APR": sim_apr, # Kept from New Code
-                "Initial Utilization": initial_util,
-                "Final Utilization": final_util,
-                "Liquid Move ($)": liquid_move,
-                "Stuck Funds ($)": stuck_funds,
-                "Ann. Yield": target_val * new_apy,
-                "Ann. Yield (Realized)": realized_interest_item, # Kept from New Code
-                "Initial Liq.": current_avail,
-                "Final Liq.": final_available,
+                "Simulated APY": target_apy, # Theoretical goal
+                "Simulated APR": realized_apr, # Realized reality
+                "Initial Utilization": m['raw_borrow'] / m['raw_supply'] if m['raw_supply'] > 0 else 0,
+                "Final Utilization": final_util, # Realized reality
+                "Liquid Move ($)": liquid_move_usd,
+                "Stuck Funds ($)": stuck_funds_usd,
+                "Ann. Yield": target_val * target_apy, # Theoretical goal
+                "Ann. Yield (Realized)": realized_interest_item, # Realized reality
+                "Initial Liq.": current_avail_usd,
+                "Final Liq.": final_available_usd, # Realized reality
                 "% Liq. Share": liq_share,
                 "Market ID Full": m['Market ID'],
                 "Loan Address": m.get('Loan Address'),
