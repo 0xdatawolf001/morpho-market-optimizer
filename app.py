@@ -1682,8 +1682,9 @@ if not df_selected.empty:
             final_alloc = np.array([m['existing_balance_usd'] for m in market_data_list])
 
         results = []
-        new_annual_interest = 0 # APY Based
-        new_annual_apr_interest = 0 # APR Based
+        theoretical_annual_interest = 0
+        realized_annual_interest = 0
+        realized_annual_apr_interest = 0
         total_allocated_usd = 0.0
         total_stuck_usd = 0.0
         
@@ -1695,77 +1696,59 @@ if not df_selected.empty:
             multiplier = 10**m['Decimals']
             user_current = m['existing_balance_usd']
             
-            initial_util = m['raw_borrow'] / m['raw_supply'] if m['raw_supply'] > 0 else 0
-            
-            user_existing_wei = (user_current / token_price) * multiplier if token_price > 0 else 0
-            target_wei = (target_val / token_price) * multiplier if token_price > 0 else 0
-            base_supply_wei = max(0, m['raw_supply'] - user_existing_wei)
-            simulated_total_supply_wei = base_supply_wei + target_wei
-            final_util = m['raw_borrow'] / simulated_total_supply_wei if simulated_total_supply_wei > 0 else 0
-            
+            # --- LIQUIDITY & REALIZATION MATH ---
             current_avail = m.get('Available Liquidity (USD)', 0.0)
-            base_available = max(0, current_avail - user_current)
-            final_available = base_available + target_val
-            liq_share = target_val / final_available if final_available > 0 else 0
-            
             net_move = target_val - user_current
+            
             requested_withdrawal = max(0, -net_move)
             stuck_funds = max(0, requested_withdrawal - current_avail)
             actual_withdrawable = requested_withdrawal - stuck_funds
+            
+            # liquid_move is needed for the Transfer tables
             liquid_move = -actual_withdrawable if net_move < 0 else net_move
+            realized_target_val = user_current + liquid_move
             total_stuck_usd += stuck_funds
             
-            if net_move > 0.01:
-                action = "🟢 DEPOSIT"
-            elif net_move < -0.01:
-                if actual_withdrawable <= 0.01:
-                    action = "⚠️ STUCK"
-                elif stuck_funds > 0.01:
-                    action = "🟠 PARTIAL"
-                else:
-                    action = "🔴 WITHDRAW"
-            else:
-                action = "⚪ HOLD"
-
+            # APY Calculations
             current_apy_val = m.get('current_supply_apy', 0.0)
-            new_apy = current_apy_val if abs(net_move) < 0.01 else opt.simulate_apy(m, target_val)
+            sim_apy = current_apy_val if abs(net_move) < 0.01 else opt.simulate_apy(m, target_val)
             
-            # --- APY vs APR MATH ---
-            new_annual_interest += (target_val * new_apy)
-            # Convert APY to APR (Linear) for conservative short-term metrics
-            rate_sec = apy_to_rate_per_second(new_apy)
-            new_apr = rate_sec * SECONDS_PER_YEAR
-            new_annual_apr_interest += (target_val * new_apr)
+            # Interest logic
+            theoretical_annual_interest += (target_val * sim_apy)
+            realized_interest_item = (realized_target_val * sim_apy)
+            realized_annual_interest += realized_interest_item
+            
+            # Realized APR Version
+            rate_sec = apy_to_rate_per_second(sim_apy)
+            realized_annual_apr_interest += (realized_target_val * (rate_sec * SECONDS_PER_YEAR))
 
+            # Contribution Math (for table)
             current_contrib = (user_current / total_optimizable * current_apy_val) if total_optimizable > 0 else 0
-            selected_contrib = (target_val / total_optimizable * new_apy) if total_optimizable > 0 else 0
-            net_apy_impact = selected_contrib - current_contrib
+            target_contrib = (target_val / total_optimizable * sim_apy) if total_optimizable > 0 else 0
+            net_apy_impact = target_contrib - current_contrib
 
             results.append({
                 "Destination ID": str(m['Market ID'])[:7],
                 "Market": f"{m['Loan Token']}/{m['Collateral']}",
                 "Token": m['Loan Token'],
                 "Chain": m['Chain'], 
-                "Action": action,
+                "Action": "🟢 DEPOSIT" if net_move > 0.01 else ("⚠️ STUCK" if actual_withdrawable <= 0.01 and net_move < -0.01 else "🔴 WITHDRAW" if net_move < -0.01 else "⚪ HOLD"),
                 "Weight": target_val / total_optimizable if total_optimizable > 0 else 0,
                 "Net APY Impact": net_apy_impact,
-                "Contribution (Target)": selected_contrib,
-                "Contribution (Current)": current_contrib,
                 "Current ($)": user_current,
                 "Target ($)": target_val,
+                "Realized ($)": realized_target_val,
                 "Net Move ($)": net_move,
+                "Liquid Move ($)": liquid_move, # RESTORED KEY
                 "Current APY": current_apy_val,
-                "Simulated APY": new_apy,
-                "Simulated APR": new_apr,
-                "Initial Utilization": initial_util,
-                "Final Utilization": final_util,
-                "Liquid Move ($)": liquid_move,
+                "Simulated APY": sim_apy,
+                "Simulated APR": (rate_sec * SECONDS_PER_YEAR),
+                "Ann. Yield (Realized)": realized_interest_item,
                 "Stuck Funds ($)": stuck_funds,
-                "Ann. Yield": target_val * new_apy,
-                "Initial Liq.": current_avail,
-                "Final Liq.": final_available,
-                "% Liq. Share": liq_share,
                 "Market ID Full": m['Market ID'],
+                "Loan Address": m.get('Loan Address'),
+                "Price USD": m.get('Price USD'),
+                "Decimals": m.get('Decimals'),
                 "ChainID": m['ChainID'],
                 "Link To Market": f"https://www.monarchlend.xyz/market/{int(m['ChainID'])}/{m['Market ID']}"
             })
@@ -1776,51 +1759,66 @@ if not df_selected.empty:
             results.append({
                 "Market": "⚠️ Unallocated Cash", "Token": "CASH", "Chain": "Wallet", "Action": "⚪ HOLD",
                 "Weight": unallocated_cash / total_optimizable if total_optimizable > 0 else 0,
-                "Net APY Impact": 0.0, "Contribution (Target)": 0.0, "Contribution (Current)": 0.0,
-                "Current ($)": 0.0, "Target ($)": unallocated_cash, "Net Move ($)": 0.0, 
-                "Current APY": 0.0, "Simulated APY": 0.0, "Simulated APR": 0.0, "Ann. Yield": 0.0,
-                "Initial Liq.": 0.0, "Final Liq.": 0.0, "% Liq. Share": 0.0
+                "Net APY Impact": 0.0, "Current ($)": 0.0, "Target ($)": unallocated_cash, "Realized ($)": unallocated_cash,
+                "Net Move ($)": 0.0, "Liquid Move ($)": 0.0, "Current APY": 0.0, "Simulated APY": 0.0, "Simulated APR": 0.0, 
+                "Ann. Yield (Realized)": 0.0, "Stuck Funds ($)": 0.0
             })
         
         df_res = pd.DataFrame(results)
         df_res = df_res.sort_values(by=["Net APY Impact", "Weight"], ascending=[False, False])
         
-        current_blended = res_data['current_metrics']['blended_apy']
-        current_ann = res_data['current_metrics']['annual_interest']
-        new_blended_apy = new_annual_interest / total_optimizable if total_optimizable > 0 else 0.0
+        # Define variable aliases for legacy downstream code
+        new_annual_interest = realized_annual_interest
         
-        apy_diff = new_blended_apy - current_blended
-        interest_diff = new_annual_interest - current_ann
-        selected_weights = np.array([r['Weight'] for r in results if 'Weight' in r])
-        selected_diversity = 1.0 - np.sum(selected_weights**2)
-
+        # Metric Calculations
+        current_blended = res_data['current_metrics']['blended_apy']
+        realized_blended_apy = realized_annual_interest / total_optimizable if total_optimizable > 0 else 0.0
+        theoretical_blended_apy = theoretical_annual_interest / total_optimizable if total_optimizable > 0 else 0.0
+        
+        # UI Header
         m1, m2, m3, m4, m5, m6 = st.columns(6) 
         m1.metric("Current APY", f"{current_blended:.4%}")
-        m2.metric("Optimized APY", f"{new_blended_apy:.4%}", delta=f"{apy_diff*100:.3f}%")
-        m3.metric("Total Wealth (1 Yr)", f"${total_optimizable + new_annual_interest:,.2f}")
-        m4.metric("Annual Interest Gain", f"${interest_diff:,.2f}")
+        
+        m2.metric(
+            "Realized APY", 
+            f"{realized_blended_apy:.4%}", 
+            delta=f"{(realized_blended_apy - current_blended):.4%}",
+            help=f"Theoretical Target APY: {theoretical_blended_apy:.4%}. Realized APY accounts for funds currently stuck due to market liquidity."
+        )
+        
+        m3.metric("Total Wealth (1 Yr)", f"${total_optimizable + realized_annual_interest:,.2f}")
+        
+        m4.metric(
+            "Annual Interest Gain", 
+            f"${(realized_annual_interest - res_data['current_metrics']['annual_interest']):,.2f}",
+            help=f"Theoretical Max Gain: ${(theoretical_annual_interest - res_data['current_metrics']['annual_interest']):,.2f}"
+        )
+        
+        selected_weights = np.array([r['Weight'] for r in results if 'Weight' in r])
+        selected_diversity = 1.0 - np.sum(selected_weights**2)
         m5.metric("Diversity Score", f"{selected_diversity:.4f}")
+        
         m6.metric("Stuck Capital", f"${total_stuck_usd:,.2f}", delta_color="inverse", delta="Liquidity Issue" if total_stuck_usd > 0 else None)
 
+        # Row 2: Time-Based Earnings Breakdown
         st.markdown("---")
         st.subheader("📈 Projected Earnings")
-
-        # --- TOGGLE SECTION ---
+        
         calc_basis = st.radio(
             "Rate Calculation Basis:",
             ["Compounded (APY)", "Linear (APR)"],
-            index=1, # DEFAULT TO LINEAR (APR)
+            index=1, 
             horizontal=True,
-            help="Linear (APR) is more conservative and accurate for short-term (daily/hourly) cashflow. Compounded (APY) reflects the average return over 1 year assuming all interest is reinvested."
+            help="Linear (APR) is more conservative and accurate for short-term (daily/hourly) cashflow."
         )
 
         if "Linear" in calc_basis:
-            active_interest = new_annual_apr_interest
+            active_interest = realized_annual_apr_interest
             label_suffix = "(APR)"
         else:
-            active_interest = new_annual_interest
+            active_interest = realized_annual_interest
             label_suffix = "(APY)"
-        
+
         t1, t2, t3, t4, t5 = st.columns(5)
         t1.metric(f"Annual {label_suffix}", f"${active_interest:,.2f}")
         t2.metric(f"Monthly {label_suffix}", f"${active_interest/12:,.2f}")
@@ -1831,44 +1829,27 @@ if not df_selected.empty:
         st.divider()
         st.subheader("⚖️ Allocations")
 
-        # Color formatting for the Impact Column
         def style_impact(val):
             color = '#00E676' if val > 0.000001 else '#FF5252' if val < -0.000001 else '#9E9E9E'
             return f'color: {color}; font-weight: bold'
 
         st.dataframe(
             df_res.style.format({
-                "Weight": "{:.2%}", 
-                "Net APY Impact": "{:+.4%}",
-                "Contribution (Target)": "{:.4%}",
-                "Contribution (Current)": "{:.4%}",
-                "Initial Utilization": "{:.2%}",      
-                "Final Utilization": "{:.2%}",        
-                "Current ($)": "${:,.2f}", 
-                "Target ($)": "${:,.2f}", 
-                "Net Move ($)": "${:,.2f}",
-                "Liquid Move ($)": "${:,.2f}",
-                "Stuck Funds ($)": "${:,.2f}",
-                "Current APY": "{:.4%}",
-                "Simulated APY": "{:.4%}",
-                "Ann. Yield": "${:,.2f}",
-                "Initial Liq.": "${:,.2f}",
-                "Final Liq.": "${:,.2f}",
-                "% Liq. Share": "{:.2%}"
+                "Weight": "{:.2%}", "Net APY Impact": "{:+.4%}",
+                "Current ($)": "${:,.2f}", "Target ($)": "${:,.2f}", "Realized ($)": "${:,.2f}",
+                "Net Move ($)": "${:,.2f}", "Stuck Funds ($)": "${:,.2f}",
+                "Current APY": "{:.4%}", "Simulated APY": "{:.4%}", "Simulated APR": "{:.4%}",
+                "Ann. Yield (Realized)": "${:,.2f}"
             }).applymap(style_impact, subset=['Net APY Impact']), 
             column_config={
-                "Net APY Impact": st.column_config.NumberColumn(
-                    "Net APY Impact 🚀",
-                    help="The absolute additive change this market provides to your TOTAL Portfolio APY (Selected Contrib - Current Contrib)."
-                ),
+                "Net APY Impact": st.column_config.NumberColumn("Net APY Impact 🚀", help="Theoretical change to Portfolio APY."),
+                "Realized ($)": st.column_config.NumberColumn("Realized ($)", help="Final balance after considering stuck funds."),
                 "Link To Market": st.column_config.LinkColumn("Link To Market", display_text="Link")
             },
             column_order=["Destination ID", "Market", "Chain", "Action", "Weight", 
-                          "Net APY Impact", "Contribution (Target)", "Contribution (Current)",
-                          "Current ($)", "Target ($)", "Net Move ($)", 
-                          "Current APY", "Simulated APY", "Ann. Yield",
-                          "Initial Utilization", "Final Utilization", 
-                          "Initial Liq.", "Final Liq.", "% Liq. Share", "Link To Market"],
+                          "Net APY Impact", "Current ($)", "Target ($)", "Realized ($)", 
+                          "Current APY", "Simulated APY", "Simulated APR", "Ann. Yield (Realized)",
+                          "Stuck Funds ($)", "Link To Market"],
             width='stretch', 
             hide_index=True
         )
@@ -1882,7 +1863,6 @@ if not df_selected.empty:
         st.markdown("#### 📤 Withdrawal Operations Split")
         st.caption("How funds move from source markets to destinations based on your constraints.")
         
-        # 1. Define Silo Mapping for the Table
         def get_silo_key(row):
             if "1)" in rebalance_scope: return "GLOBAL"
             if "2)" in rebalance_scope: return (row['Chain'], row['Token'])
@@ -1890,11 +1870,11 @@ if not df_selected.empty:
             if "4)" in rebalance_scope: return row['Token']
             return "GLOBAL"
 
-        # 2. Calculate Demand within Silos
-        silo_token_demand = {} # (Chain, Token) -> Amount
-        silo_chain_demand = {} # Chain -> Amount
-        silo_global_demand = {} # Silo Key -> Amount
+        silo_global_demand = {} 
+        silo_token_demand = {}
+        silo_chain_demand = {}
         
+        # We use Net Move here because it represents what the optimizer INTENDED to move
         deposits = df_res[df_res['Net Move ($)'] > 0.01]
         for _, row in deposits.iterrows():
             c, t = row['Chain'], row['Token']
@@ -1906,17 +1886,16 @@ if not df_selected.empty:
             silo_global_demand[s_key] = silo_global_demand.get(s_key, 0.0) + amt
             
         withdraw_logic = []
-        withdrawals = df_res[df_res['Net Move ($)'] < -0.01].copy()
+        # Filter withdrawals using the restored 'Liquid Move ($)' key
+        withdrawals = df_res[df_res['Liquid Move ($)'] < -0.01].copy()
         
         for _, row in withdrawals.iterrows():
             src_chain, src_token = row['Chain'], row['Token']
             src_name, src_id = row['Market'], row['Destination ID']
-            total_moved = abs(row['Net Move ($)'])
+            total_moved = abs(row['Liquid Move ($)'])
             remaining = total_moved
             s_key = get_silo_key(row)
             
-            # 1. Internal Rebalance (Same Asset, Same Chain)
-            # This is always allowed in every mode
             matched_reb = min(remaining, silo_token_demand.get((src_chain, src_token), 0.0))
             if matched_reb > 0.01:
                 silo_token_demand[(src_chain, src_token)] -= matched_reb
@@ -1925,8 +1904,6 @@ if not df_selected.empty:
                 remaining -= matched_reb
             else: matched_reb = 0.0
 
-            # 2. Internal Swap (Same Chain, Different Token)
-            # Only allowed if scope is "Full" or "Within Chain/Diff Token"
             matched_swap = 0.0
             if "1)" in rebalance_scope or "3)" in rebalance_scope:
                 matched_swap = min(remaining, silo_chain_demand.get(src_chain, 0.0))
@@ -1934,31 +1911,20 @@ if not df_selected.empty:
                     silo_chain_demand[src_chain] -= matched_swap
                     silo_global_demand[s_key] -= matched_swap
                     remaining -= matched_swap
-                else: matched_swap = 0.0
 
-            # 3. Bridge Out (Different Chain)
-            # Only allowed if scope is "Full" or "Across Chain/Same Token"
             matched_bridge = 0.0
             if "1)" in rebalance_scope or "4)" in rebalance_scope:
                 matched_bridge = min(remaining, silo_global_demand.get(s_key, 0.0))
                 if matched_bridge > 0.01:
                     silo_global_demand[s_key] -= matched_bridge
                     remaining -= matched_bridge
-                else: matched_bridge = 0.0
 
-            # 4. Cash Out (Wallet) - The remainder
             matched_cash = remaining
 
             withdraw_logic.append({
-                "Source Market": src_name,
-                "Market ID": src_id,
-                "Chain": src_chain,
-                "Asset": src_token,
-                "Total Withdrawal": total_moved,
-                "1. Internal Rebalance": matched_reb,
-                "2. Internal Swap": matched_swap,
-                "3. Bridge Out": matched_bridge,
-                "4. Cash Out": matched_cash
+                "Source Market": src_name, "Market ID": src_id, "Chain": src_chain, "Asset": src_token,
+                "Total Withdrawal": total_moved, "1. Internal Rebalance": matched_reb,
+                "2. Internal Swap": matched_swap, "3. Bridge Out": matched_bridge, "4. Cash Out": matched_cash
             })
             
         if withdraw_logic:
