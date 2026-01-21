@@ -51,12 +51,6 @@ def apy_to_rate_per_second(apy_float: float) -> float:
 def rate_per_second_to_apy(rate: float) -> float:
     return math.exp(rate * SECONDS_PER_YEAR) - 1
 
-def apy_to_apr(apy_float: float) -> float:
-    """Converts compounded APY to Linear APR (Annual Percentage Rate)"""
-    if apy_float <= 0: return 0.0
-    rate_per_sec = apy_to_rate_per_second(apy_float)
-    return rate_per_sec * SECONDS_PER_YEAR
-
 def compute_curve_multiplier(utilization: float) -> float:
     if utilization <= TARGET_UTILIZATION:
         numerator = (CURVE_STEEPNESS - 1) * (utilization / TARGET_UTILIZATION) + 1
@@ -1684,10 +1678,12 @@ if not df_selected.empty:
             final_alloc = np.array([m['existing_balance_usd'] for m in market_data_list])
 
         results = []
-        new_annual_interest = 0    # Compounded (Total growth)
-        new_linear_interest = 0    # Linear (Current cashflow speed)
+        new_annual_interest = 0
         total_allocated_usd = 0.0
         total_stuck_usd = 0.0
+        
+        # We use total_optimizable as the denominator for both current and target 
+        # to ensure the "Impact" is additive relative to the same portfolio size.
         
         for i, target_val in enumerate(final_alloc):
             m = market_data_list[i]
@@ -1738,17 +1734,14 @@ if not df_selected.empty:
             # APY Calculations
             current_apy_val = m.get('current_supply_apy', 0.0)
             new_apy = current_apy_val if abs(net_move) < 0.01 else opt.simulate_apy(m, target_val)
-            
-            # NEW MATH: Separate Compounded Yield from Linear Accrual
             new_annual_interest += (target_val * new_apy)
-            
-            # Convert APY to APR for immediate earnings projection
-            new_apr = apy_to_apr(new_apy)
-            new_linear_interest += (target_val * new_apr)
 
             # --- ADDITIVE APY IMPACT CALCULATION ---
+            # How much did this market contribute to total APY BEFORE rebalance?
             current_contrib = (user_current / total_optimizable * current_apy_val) if total_optimizable > 0 else 0
+            # How much does it contribute AFTER rebalance?
             selected_contrib = (target_val / total_optimizable * new_apy) if total_optimizable > 0 else 0
+            # The net change in the portfolio's total APY caused by this specific market.
             net_apy_impact = selected_contrib - current_contrib
 
             results.append({
@@ -1766,7 +1759,6 @@ if not df_selected.empty:
                 "Net Move ($)": net_move,
                 "Current APY": current_apy_val,
                 "Simulated APY": new_apy,
-                "Simulated APR": new_apr, # Added to data for transparency
                 "Initial Utilization": initial_util,
                 "Final Utilization": final_util,
                 "Liquid Move ($)": liquid_move,
@@ -1827,18 +1819,14 @@ if not df_selected.empty:
 
         # Row 2: Time-Based Earnings Breakdown
         st.markdown("---")
-        st.subheader("📈 Projected Earnings (Linear Accrual)")
-        st.caption("Daily and Hourly projections use Linear APR (real-time accrual) to reflect what you will see in your wallet today. Annual projection includes compounding.")
+        st.subheader("📈 Projected Earnings")
         
         t1, t2, t3, t4, t5 = st.columns(5)
-        # Annual still shows the full APY potential
-        t1.metric("Annual (Compounded)", f"${new_annual_interest:,.2f}")
-        
-        # Monthly to Hourly now use the Linear Accrual Rate
-        t2.metric("Monthly", f"${new_linear_interest/12:,.2f}")
-        t3.metric("Weekly", f"${new_linear_interest/52:,.2f}")
-        t4.metric("Daily", f"${new_linear_interest/365:,.2f}")
-        t5.metric("Hourly", f"${new_linear_interest/8760:,.4f}")
+        t1.metric("Annual", f"${new_annual_interest:,.2f}")
+        t2.metric("Monthly", f"${new_annual_interest/12:,.2f}")
+        t3.metric("Weekly", f"${new_annual_interest/52:,.2f}")
+        t4.metric("Daily", f"${new_annual_interest/365:,.2f}")
+        t5.metric("Hourly", f"${new_annual_interest/8760:,.4f}")
 
         st.divider()
         st.subheader("⚖️ Allocations")
