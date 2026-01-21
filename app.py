@@ -1692,59 +1692,84 @@ if not df_selected.empty:
             m = market_data_list[i]
             total_allocated_usd += target_val
             
+            # --- MATH HELPERS ---
             token_price = m['Price USD']
             multiplier = 10**m['Decimals']
             user_current = m['existing_balance_usd']
             
-            # --- LIQUIDITY & REALIZATION MATH ---
-            current_avail = m.get('Available Liquidity (USD)', 0.0)
-            net_move = target_val - user_current
+            # 1. Utilization Math
+            initial_util = m['raw_borrow'] / m['raw_supply'] if m['raw_supply'] > 0 else 0
+            user_existing_wei = (user_current / token_price) * multiplier if token_price > 0 else 0
+            target_wei = (target_val / token_price) * multiplier if token_price > 0 else 0
+            base_supply_wei = max(0, m['raw_supply'] - user_existing_wei)
+            simulated_total_supply_wei = base_supply_wei + target_wei
+            final_util = m['raw_borrow'] / simulated_total_supply_wei if simulated_total_supply_wei > 0 else 0
             
+            # 2. Liquidity & Realization Math
+            current_avail = m.get('Available Liquidity (USD)', 0.0)
+            base_available = max(0, current_avail - user_current)
+            final_available = base_available + target_val
+            liq_share = target_val / final_available if final_available > 0 else 0
+            
+            net_move = target_val - user_current
             requested_withdrawal = max(0, -net_move)
             stuck_funds = max(0, requested_withdrawal - current_avail)
             actual_withdrawable = requested_withdrawal - stuck_funds
-            
-            # liquid_move is needed for the Transfer tables
             liquid_move = -actual_withdrawable if net_move < 0 else net_move
             realized_target_val = user_current + liquid_move
             total_stuck_usd += stuck_funds
             
-            # APY Calculations
+            # 3. Action Logic
+            if net_move > 0.01:
+                action = "🟢 DEPOSIT"
+            elif net_move < -0.01:
+                action = "⚠️ STUCK" if actual_withdrawable <= 0.01 else "🔴 WITHDRAW"
+            else:
+                action = "⚪ HOLD"
+
+            # 4. APY & APR Calculations
             current_apy_val = m.get('current_supply_apy', 0.0)
-            sim_apy = current_apy_val if abs(net_move) < 0.01 else opt.simulate_apy(m, target_val)
+            new_apy = current_apy_val if abs(net_move) < 0.01 else opt.simulate_apy(m, target_val)
+            rate_sec = apy_to_rate_per_second(new_apy)
+            sim_apr = rate_sec * SECONDS_PER_YEAR
             
-            # Interest logic
-            theoretical_annual_interest += (target_val * sim_apy)
-            realized_interest_item = (realized_target_val * sim_apy)
-            realized_annual_interest += realized_interest_item
-            
-            # Realized APR Version
-            rate_sec = apy_to_rate_per_second(sim_apy)
-            realized_annual_apr_interest += (realized_target_val * (rate_sec * SECONDS_PER_YEAR))
-
-            # Contribution Math (for table)
+            # 5. Contribution & Totals
             current_contrib = (user_current / total_optimizable * current_apy_val) if total_optimizable > 0 else 0
-            target_contrib = (target_val / total_optimizable * sim_apy) if total_optimizable > 0 else 0
-            net_apy_impact = target_contrib - current_contrib
+            selected_contrib = (target_val / total_optimizable * new_apy) if total_optimizable > 0 else 0
+            net_apy_impact = selected_contrib - current_contrib
+            
+            theoretical_annual_interest += (target_val * new_apy)
+            realized_interest_item = (realized_target_val * new_apy)
+            realized_annual_interest += realized_interest_item
+            realized_annual_apr_interest += (realized_target_val * sim_apr)
 
+            # --- CONSTRUCT DICTIONARY AS REQUESTED ---
             results.append({
                 "Destination ID": str(m['Market ID'])[:7],
                 "Market": f"{m['Loan Token']}/{m['Collateral']}",
                 "Token": m['Loan Token'],
                 "Chain": m['Chain'], 
-                "Action": "🟢 DEPOSIT" if net_move > 0.01 else ("⚠️ STUCK" if actual_withdrawable <= 0.01 and net_move < -0.01 else "🔴 WITHDRAW" if net_move < -0.01 else "⚪ HOLD"),
+                "Action": action,
                 "Weight": target_val / total_optimizable if total_optimizable > 0 else 0,
                 "Net APY Impact": net_apy_impact,
+                "Contribution (Target)": selected_contrib,
+                "Contribution (Current)": current_contrib,
                 "Current ($)": user_current,
                 "Target ($)": target_val,
-                "Realized ($)": realized_target_val,
+                "Realized ($)": realized_target_val, # Kept from New Code
                 "Net Move ($)": net_move,
-                "Liquid Move ($)": liquid_move, # RESTORED KEY
                 "Current APY": current_apy_val,
-                "Simulated APY": sim_apy,
-                "Simulated APR": (rate_sec * SECONDS_PER_YEAR),
-                "Ann. Yield (Realized)": realized_interest_item,
+                "Simulated APY": new_apy,
+                "Simulated APR": sim_apr, # Kept from New Code
+                "Initial Utilization": initial_util,
+                "Final Utilization": final_util,
+                "Liquid Move ($)": liquid_move,
                 "Stuck Funds ($)": stuck_funds,
+                "Ann. Yield": target_val * new_apy,
+                "Ann. Yield (Realized)": realized_interest_item, # Kept from New Code
+                "Initial Liq.": current_avail,
+                "Final Liq.": final_available,
+                "% Liq. Share": liq_share,
                 "Market ID Full": m['Market ID'],
                 "Loan Address": m.get('Loan Address'),
                 "Price USD": m.get('Price USD'),
@@ -1753,21 +1778,23 @@ if not df_selected.empty:
                 "Link To Market": f"https://www.monarchlend.xyz/market/{int(m['ChainID'])}/{m['Market ID']}"
             })
 
-        # --- Check for Unallocated Capital ---
+        # 6. Check for Unallocated Cash
         unallocated_cash = total_optimizable - total_allocated_usd
         if unallocated_cash > 0.01:
             results.append({
                 "Market": "⚠️ Unallocated Cash", "Token": "CASH", "Chain": "Wallet", "Action": "⚪ HOLD",
                 "Weight": unallocated_cash / total_optimizable if total_optimizable > 0 else 0,
-                "Net APY Impact": 0.0, "Current ($)": 0.0, "Target ($)": unallocated_cash, "Realized ($)": unallocated_cash,
+                "Net APY Impact": 0.0, "Contribution (Target)": 0.0, "Contribution (Current)": 0.0,
+                "Current ($)": 0.0, "Target ($)": unallocated_cash, "Realized ($)": unallocated_cash,
                 "Net Move ($)": 0.0, "Liquid Move ($)": 0.0, "Current APY": 0.0, "Simulated APY": 0.0, "Simulated APR": 0.0, 
-                "Ann. Yield (Realized)": 0.0, "Stuck Funds ($)": 0.0
+                "Ann. Yield": 0.0, "Ann. Yield (Realized)": 0.0, "Stuck Funds ($)": 0.0,
+                "Initial Utilization": 0.0, "Final Utilization": 0.0, "Initial Liq.": 0.0, "Final Liq.": 0.0, "% Liq. Share": 0.0
             })
         
         df_res = pd.DataFrame(results)
         df_res = df_res.sort_values(by=["Net APY Impact", "Weight"], ascending=[False, False])
         
-        # Define variable aliases for legacy downstream code
+        # Define legacy aliases for downstream calculations
         new_annual_interest = realized_annual_interest
         
         # Metric Calculations
@@ -1836,20 +1863,26 @@ if not df_selected.empty:
         st.dataframe(
             df_res.style.format({
                 "Weight": "{:.2%}", "Net APY Impact": "{:+.4%}",
+                "Contribution (Target)": "{:.4%}", "Contribution (Current)": "{:.4%}",
                 "Current ($)": "${:,.2f}", "Target ($)": "${:,.2f}", "Realized ($)": "${:,.2f}",
-                "Net Move ($)": "${:,.2f}", "Stuck Funds ($)": "${:,.2f}",
+                "Net Move ($)": "${:,.2f}", "Liquid Move ($)": "${:,.2f}", "Stuck Funds ($)": "${:,.2f}",
                 "Current APY": "{:.4%}", "Simulated APY": "{:.4%}", "Simulated APR": "{:.4%}",
-                "Ann. Yield (Realized)": "${:,.2f}"
+                "Ann. Yield": "${:,.2f}", "Ann. Yield (Realized)": "${:,.2f}",
+                "Initial Utilization": "{:.2%}", "Final Utilization": "{:.2%}",
+                "Initial Liq.": "${:,.2f}", "Final Liq.": "${:,.2f}", "% Liq. Share": "{:.2%}"
             }).applymap(style_impact, subset=['Net APY Impact']), 
             column_config={
-                "Net APY Impact": st.column_config.NumberColumn("Net APY Impact 🚀", help="Theoretical change to Portfolio APY."),
-                "Realized ($)": st.column_config.NumberColumn("Realized ($)", help="Final balance after considering stuck funds."),
+                "Net APY Impact": st.column_config.NumberColumn("Net APY Impact 🚀", help="Change to total Portfolio APY."),
                 "Link To Market": st.column_config.LinkColumn("Link To Market", display_text="Link")
             },
-            column_order=["Destination ID", "Market", "Chain", "Action", "Weight", 
-                          "Net APY Impact", "Current ($)", "Target ($)", "Realized ($)", 
-                          "Current APY", "Simulated APY", "Simulated APR", "Ann. Yield (Realized)",
-                          "Stuck Funds ($)", "Link To Market"],
+            column_order=[
+                "Destination ID", "Market", "Chain", "Action", "Weight", 
+                "Net APY Impact", "Contribution (Target)", "Contribution (Current)",
+                "Current ($)", "Target ($)", "Realized ($)", "Net Move ($)", 
+                "Current APY", "Simulated APY", "Simulated APR", "Ann. Yield", "Ann. Yield (Realized)",
+                "Initial Utilization", "Final Utilization", "Initial Liq.", "Final Liq.", "% Liq. Share",
+                "Liquid Move ($)", "Stuck Funds ($)", "Link To Market"
+            ],
             width='stretch', 
             hide_index=True
         )
