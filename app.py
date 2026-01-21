@@ -51,6 +51,12 @@ def apy_to_rate_per_second(apy_float: float) -> float:
 def rate_per_second_to_apy(rate: float) -> float:
     return math.exp(rate * SECONDS_PER_YEAR) - 1
 
+def apy_to_apr(apy_float: float) -> float:
+    """Converts compounded APY to Linear APR (Annual Percentage Rate)"""
+    if apy_float <= 0: return 0.0
+    rate_per_sec = apy_to_rate_per_second(apy_float)
+    return rate_per_sec * SECONDS_PER_YEAR
+
 def compute_curve_multiplier(utilization: float) -> float:
     if utilization <= TARGET_UTILIZATION:
         numerator = (CURVE_STEEPNESS - 1) * (utilization / TARGET_UTILIZATION) + 1
@@ -1666,7 +1672,6 @@ if not df_selected.empty:
             final_alloc = best_yield_alloc
         elif "Whale" in strategy_choice:
             final_alloc = whale_alloc
-            # Show capacity warnings if they exist
             if hasattr(res_data['opt_object'], 'capacity_warning') and res_data['opt_object'].capacity_warning:
                 st.warning(res_data['opt_object'].capacity_warning)
         elif "Frontier" in strategy_choice:
@@ -1674,43 +1679,35 @@ if not df_selected.empty:
         elif "Liquid" in strategy_choice:
             final_alloc = liquid_alloc
         else:
-            # Current Portfolio: Target = Current Balance
             final_alloc = np.array([m['existing_balance_usd'] for m in market_data_list])
 
         results = []
-        new_annual_interest = 0
+        new_annual_interest = 0 # APY Based
+        new_annual_apr_interest = 0 # APR Based
         total_allocated_usd = 0.0
         total_stuck_usd = 0.0
-        
-        # We use total_optimizable as the denominator for both current and target 
-        # to ensure the "Impact" is additive relative to the same portfolio size.
         
         for i, target_val in enumerate(final_alloc):
             m = market_data_list[i]
             total_allocated_usd += target_val
             
-            # --- MATH HELPERS ---
             token_price = m['Price USD']
             multiplier = 10**m['Decimals']
             user_current = m['existing_balance_usd']
             
-            # Initial Util (from raw market data)
             initial_util = m['raw_borrow'] / m['raw_supply'] if m['raw_supply'] > 0 else 0
             
-            # Final Util (accounting for user's net change in supply)
             user_existing_wei = (user_current / token_price) * multiplier if token_price > 0 else 0
             target_wei = (target_val / token_price) * multiplier if token_price > 0 else 0
             base_supply_wei = max(0, m['raw_supply'] - user_existing_wei)
             simulated_total_supply_wei = base_supply_wei + target_wei
             final_util = m['raw_borrow'] / simulated_total_supply_wei if simulated_total_supply_wei > 0 else 0
             
-            # --- LIQUIDITY MATH ---
             current_avail = m.get('Available Liquidity (USD)', 0.0)
             base_available = max(0, current_avail - user_current)
             final_available = base_available + target_val
             liq_share = target_val / final_available if final_available > 0 else 0
             
-            # Movement and Stuck logic
             net_move = target_val - user_current
             requested_withdrawal = max(0, -net_move)
             stuck_funds = max(0, requested_withdrawal - current_avail)
@@ -1718,7 +1715,6 @@ if not df_selected.empty:
             liquid_move = -actual_withdrawable if net_move < 0 else net_move
             total_stuck_usd += stuck_funds
             
-            # Action State Logic
             if net_move > 0.01:
                 action = "🟢 DEPOSIT"
             elif net_move < -0.01:
@@ -1731,17 +1727,18 @@ if not df_selected.empty:
             else:
                 action = "⚪ HOLD"
 
-            # APY Calculations
             current_apy_val = m.get('current_supply_apy', 0.0)
             new_apy = current_apy_val if abs(net_move) < 0.01 else opt.simulate_apy(m, target_val)
+            
+            # --- APY vs APR MATH ---
             new_annual_interest += (target_val * new_apy)
+            # Convert APY to APR (Linear) for conservative short-term metrics
+            rate_sec = apy_to_rate_per_second(new_apy)
+            new_apr = rate_sec * SECONDS_PER_YEAR
+            new_annual_apr_interest += (target_val * new_apr)
 
-            # --- ADDITIVE APY IMPACT CALCULATION ---
-            # How much did this market contribute to total APY BEFORE rebalance?
             current_contrib = (user_current / total_optimizable * current_apy_val) if total_optimizable > 0 else 0
-            # How much does it contribute AFTER rebalance?
             selected_contrib = (target_val / total_optimizable * new_apy) if total_optimizable > 0 else 0
-            # The net change in the portfolio's total APY caused by this specific market.
             net_apy_impact = selected_contrib - current_contrib
 
             results.append({
@@ -1759,6 +1756,7 @@ if not df_selected.empty:
                 "Net Move ($)": net_move,
                 "Current APY": current_apy_val,
                 "Simulated APY": new_apy,
+                "Simulated APR": new_apr,
                 "Initial Utilization": initial_util,
                 "Final Utilization": final_util,
                 "Liquid Move ($)": liquid_move,
@@ -1776,28 +1774,15 @@ if not df_selected.empty:
         unallocated_cash = total_optimizable - total_allocated_usd
         if unallocated_cash > 0.01:
             results.append({
-                "Market": "⚠️ Unallocated Cash",
-                "Token": "CASH",
-                "Chain": "Wallet",
-                "Action": "⚪ HOLD",
+                "Market": "⚠️ Unallocated Cash", "Token": "CASH", "Chain": "Wallet", "Action": "⚪ HOLD",
                 "Weight": unallocated_cash / total_optimizable if total_optimizable > 0 else 0,
-                "Net APY Impact": 0.0,
-                "Contribution (Target)": 0.0,
-                "Contribution (Current)": 0.0,
-                "Current ($)": 0.0, 
-                "Target ($)": unallocated_cash,
-                "Net Move ($)": 0.0, 
-                "Current APY": 0.0,
-                "Simulated APY": 0.0,
-                "Ann. Yield": 0.0,
-                "Initial Liq.": 0.0,
-                "Final Liq.": 0.0,
-                "% Liq. Share": 0.0
+                "Net APY Impact": 0.0, "Contribution (Target)": 0.0, "Contribution (Current)": 0.0,
+                "Current ($)": 0.0, "Target ($)": unallocated_cash, "Net Move ($)": 0.0, 
+                "Current APY": 0.0, "Simulated APY": 0.0, "Simulated APR": 0.0, "Ann. Yield": 0.0,
+                "Initial Liq.": 0.0, "Final Liq.": 0.0, "% Liq. Share": 0.0
             })
         
         df_res = pd.DataFrame(results)
-        
-        # Sort by impact to highlight the most significant moves
         df_res = df_res.sort_values(by=["Net APY Impact", "Weight"], ascending=[False, False])
         
         current_blended = res_data['current_metrics']['blended_apy']
@@ -1817,16 +1802,31 @@ if not df_selected.empty:
         m5.metric("Diversity Score", f"{selected_diversity:.4f}")
         m6.metric("Stuck Capital", f"${total_stuck_usd:,.2f}", delta_color="inverse", delta="Liquidity Issue" if total_stuck_usd > 0 else None)
 
-        # Row 2: Time-Based Earnings Breakdown
         st.markdown("---")
         st.subheader("📈 Projected Earnings")
+
+        # --- TOGGLE SECTION ---
+        calc_basis = st.radio(
+            "Rate Calculation Basis:",
+            ["Compounded (APY)", "Linear (APR)"],
+            index=1, # DEFAULT TO LINEAR (APR)
+            horizontal=True,
+            help="Linear (APR) is more conservative and accurate for short-term (daily/hourly) cashflow. Compounded (APY) reflects the average return over 1 year assuming all interest is reinvested."
+        )
+
+        if "Linear" in calc_basis:
+            active_interest = new_annual_apr_interest
+            label_suffix = "(APR)"
+        else:
+            active_interest = new_annual_interest
+            label_suffix = "(APY)"
         
         t1, t2, t3, t4, t5 = st.columns(5)
-        t1.metric("Annual", f"${new_annual_interest:,.2f}")
-        t2.metric("Monthly", f"${new_annual_interest/12:,.2f}")
-        t3.metric("Weekly", f"${new_annual_interest/52:,.2f}")
-        t4.metric("Daily", f"${new_annual_interest/365:,.2f}")
-        t5.metric("Hourly", f"${new_annual_interest/8760:,.4f}")
+        t1.metric(f"Annual {label_suffix}", f"${active_interest:,.2f}")
+        t2.metric(f"Monthly {label_suffix}", f"${active_interest/12:,.2f}")
+        t3.metric(f"Weekly {label_suffix}", f"${active_interest/52:,.2f}")
+        t4.metric(f"Daily {label_suffix}", f"${active_interest/365:,.2f}")
+        t5.metric(f"Hourly {label_suffix}", f"${active_interest/8760:,.4f}")
 
         st.divider()
         st.subheader("⚖️ Allocations")
