@@ -485,37 +485,27 @@ class RebalanceOptimizer:
         self.liquid_trace = []
         self.whale_trace = []
         self.capacity_warning = None 
-        
         self.all_attempts = []
 
     def simulate_apy(self, market, user_new_alloc_usd):
-        # 1. Get Market Constants
         token_price = market['Price USD']
         if token_price <= 0: return 0.0
         decimals = market['Decimals']
         multiplier = 10**decimals
 
-        # 2. Determine "World Without User" (Base State)
         user_existing_usd = market.get('existing_balance_usd', 0.0)
         user_existing_wei = (user_existing_usd / token_price) * multiplier
         
         current_total_supply_wei = market['raw_supply']
-        
-        # Base Supply = Total Supply - User's Current Holdings
         base_supply_wei = max(0, current_total_supply_wei - user_existing_wei)
         
-        # 3. Add "New" Allocation
         user_new_wei = (user_new_alloc_usd / token_price) * multiplier
         simulated_total_supply_wei = base_supply_wei + user_new_wei
         
-        # 4. Standard Morpho Math
-        # FIX: If supply is zero or negative, return 0 yield immediately
         if simulated_total_supply_wei <= 1: 
             return 0.0
         
         new_util = market['raw_borrow'] / simulated_total_supply_wei
-        
-        # Utilization capped at 100% for the curve multiplier
         clamped_util = min(1.0, new_util)
         new_mult = compute_curve_multiplier(clamped_util)
         new_borrow_rate = market['rate_at_target'] * new_mult
@@ -523,28 +513,17 @@ class RebalanceOptimizer:
         
         return rate_per_second_to_apy(new_supply_rate)
 
-    def _get_normalized_allocations(self, x):
-        x = np.maximum(x, 0)
-        sum_x = np.sum(x)
-        if sum_x == 0: return x 
-        # If the optimizer couldn't reach the full budget due to safety bounds,
-        # we do not scale up the result, as that would violate those hard constraints.
-        if sum_x < (self.total_budget - 0.01):
-            return x
-        return x * (self.total_budget / sum_x)
-
     def _calculate_metrics(self, x):
-        normalized_x = self._get_normalized_allocations(x)
-        weights = normalized_x / self.total_budget if self.total_budget > 0 else np.zeros_like(x)
-        
+        # We assume x is already budget-compliant via the SLSQP constraint
         total_yield = 0
-        for i, alloc in enumerate(normalized_x):
+        for i, alloc in enumerate(x):
             total_yield += (alloc * self.simulate_apy(self.markets[i], alloc))
             
+        weights = x / self.total_budget if self.total_budget > 0 else np.zeros_like(x)
         hhi = np.sum(weights**2)
         diversity = 1.0 - hhi
         
-        return normalized_x, total_yield, diversity
+        return x, total_yield, diversity
 
     def _record_attempt(self, total_yield, diversity):
         self.all_attempts.append({
@@ -555,23 +534,25 @@ class RebalanceOptimizer:
         })
 
     def objective_yield(self, x):
-        norm_x, y_val, div_val = self._calculate_metrics(x)
+        _, y_val, div_val = self._calculate_metrics(x)
         self._record_attempt(y_val, div_val)
         self.yield_trace.append(y_val)
         return -y_val
 
     def objective_frontier(self, x):
-        norm_x, y_val, div_val = self._calculate_metrics(x)
+        _, y_val, div_val = self._calculate_metrics(x)
         self._record_attempt(y_val, div_val)
+        # Maximize (Yield * Diversity)
+        score = (y_val + 1e-9) * (div_val + 1e-9)
         self.frontier_trace.append(y_val) 
-        return -(y_val * div_val) 
+        return -score 
     
     def objective_liquidity(self, x):
-        norm_x, y_val, div_val = self._calculate_metrics(x)
+        _, y_val, div_val = self._calculate_metrics(x)
         self._record_attempt(y_val, div_val)
         self.liquid_trace.append(y_val)
         liq_score = 0
-        for i, alloc in enumerate(norm_x):
+        for i, alloc in enumerate(x):
             if alloc > 1.0: 
                 market = self.markets[i]
                 sim_apy = self.simulate_apy(market, alloc)
@@ -581,7 +562,8 @@ class RebalanceOptimizer:
         return -liq_score
 
     def objective_whale(self, x):
-        norm_x, y_val, div_val = self._calculate_metrics(x)
+        # Whale Shield uses pure yield objective but operates on 'whale_bounds'
+        _, y_val, div_val = self._calculate_metrics(x)
         self._record_attempt(y_val, div_val)
         self.whale_trace.append(y_val)
         return -y_val
@@ -590,14 +572,11 @@ class RebalanceOptimizer:
         n = len(self.markets)
         if n == 0: return None, None, None, None
         
-        # --- 1. Define Combined Bounds ---
         standard_bounds = []
         whale_bounds = []
-        
-        # Portfolio Cap (USD)
         port_cap_usd = self.total_budget * self.max_port_alloc_ratio
         
-        # Whale Shield Logic
+        # Whale Shield Limit
         if self.max_dominance_ratio >= 0.999:
             whale_cap_factor = 1e12 
         else:
@@ -605,88 +584,41 @@ class RebalanceOptimizer:
 
         for m in self.markets:
             current_bal = m.get('existing_balance_usd', 0.0)
+            std_lower, std_upper = 0.0, min(self.total_budget, port_cap_usd)
             
-            # --- DEFINE BOUNDS ---
-            # Default: 0 to (Budget or Cap)
-            std_lower = 0.0
-            std_upper = min(self.total_budget, port_cap_usd)
-            
-            # 1. Force Exit (Highest Priority)
             if m.get('force_exit', False):
-                std_lower = 0.0
-                std_upper = 0.0
+                std_lower = std_upper = 0.0
             else:
-                # 2. Prevent Outflows (Cannot sell/withdraw) -> Floor is Current Balance
-                if m.get('prevent_outflows', False):
-                    std_lower = current_bal
-                
-                # 3. Prevent Inflows (Cannot buy/deposit) -> Ceiling is Current Balance
-                if m.get('prevent_inflows', False):
-                    # Note: If current balance > port_cap, we stick to current balance (hold)
-                    std_upper = current_bal
+                if m.get('prevent_outflows', False): std_lower = current_bal
+                if m.get('prevent_inflows', False): std_upper = min(current_bal, std_upper)
 
-            # Apply Logic to Lists
-            standard_bounds.append((std_lower, std_upper))
+            standard_bounds.append((std_lower, max(std_lower, std_upper)))
             
-            # Whale Bounds Logic (Same logic, but upper bound constrained by liquidity shield)
+            # Liquidity calculations for Whale Shield
             token_price = m.get('Price USD', 0)
             multiplier = 10**m.get('Decimals', 18)
             user_existing_wei = (current_bal / token_price) * multiplier if token_price > 0 else 0
+            base_available_usd = ((max(0, m.get('raw_supply', 0) - m.get('raw_borrow', 0)) - user_existing_wei) / multiplier) * token_price if token_price > 0 else 0
             
-            total_supply_wei = m.get('raw_supply', 0)
-            total_borrow_wei = m.get('raw_borrow', 0)
-            current_available_wei = max(0, total_supply_wei - total_borrow_wei)
-            base_available_wei = max(0, current_available_wei - user_existing_wei)
-            base_available_usd = (base_available_wei / multiplier) * token_price if token_price > 0 else 0
-            
-            liq_shield_cap = base_available_usd * whale_cap_factor
-            
-            # Whale upper is minimum of: Standard Upper (which accounts for locks) OR Liquidity Shield
-            # However, if 'Prevent Outflows' is ON, we must respect the floor (std_lower) even if it violates whale shield.
+            liq_shield_cap = max(0, base_available_usd * whale_cap_factor)
             whale_upper = min(std_upper, liq_shield_cap)
-            
-            # Safety: If floor > ceiling (e.g. Shield says max $500, but we prevent outflow at $1000), 
-            # we must respect the explicit user lock ("Prevent Outflows").
-            if std_lower > whale_upper:
-                whale_upper = std_lower
-                
-            whale_bounds.append((std_lower, whale_upper))
+            if std_lower > whale_upper: whale_upper = std_lower
+            whale_bounds.append((std_lower, max(std_lower, whale_upper)))
 
-        # Starting guess logic (unchanged essentially, just using new bounds)
-        x0 = np.zeros(n)
-        remaining_budget = self.total_budget
-        
-        # Pre-fill fixed slots
-        for i, b in enumerate(standard_bounds):
-            if b[0] == b[1]: 
-                x0[i] = b[0]
-                remaining_budget -= b[0]
-        
-        fixed_mask = np.array([b[0] == b[1] for b in standard_bounds])
-        if not all(fixed_mask):
-            # Distribute remainder safely
-            active_count = np.sum(~fixed_mask)
-            if active_count > 0:
-                dist_amount = max(0, remaining_budget) / active_count
-                x0[~fixed_mask] = dist_amount
+        # Starting Guess: Proportional to current bounds
+        x0 = np.array([(b[0] + b[1]) / 2.0 for b in standard_bounds])
+        if np.sum(x0) > 0: x0 = x0 * (self.total_budget / np.sum(x0))
 
         constraints = ({'type': 'eq', 'fun': lambda x: np.sum(x) - self.total_budget})
-        options = {'maxiter': 5000, 'ftol': 1e-6}
+        # Note: We use a slightly more relaxed tolerance to help the solver move away from local minima
+        options = {'maxiter': 2000, 'ftol': 1e-8}
 
-        # Run the optimizations
         res_yield = minimize(self.objective_yield, x0, method='SLSQP', bounds=standard_bounds, constraints=constraints, options=options)
-        best_yield_alloc = self._get_normalized_allocations(res_yield.x)
-
         res_frontier = minimize(self.objective_frontier, x0, method='SLSQP', bounds=standard_bounds, constraints=constraints, options=options)
-        best_frontier_alloc = self._get_normalized_allocations(res_frontier.x)
-        
         res_liq = minimize(self.objective_liquidity, x0, method='SLSQP', bounds=whale_bounds, constraints=constraints, options=options)
-        best_liquid_alloc = self._get_normalized_allocations(res_liq.x)
-        
         res_whale = minimize(self.objective_whale, x0, method='SLSQP', bounds=whale_bounds, constraints=constraints, options=options)
-        best_whale_alloc = self._get_normalized_allocations(res_whale.x)
         
-        return best_yield_alloc, best_frontier_alloc, best_liquid_alloc, best_whale_alloc
+        return res_yield.x, res_frontier.x, res_liq.x, res_whale.x
     
 # ==========================================
 # 4. STREAMLIT UI
