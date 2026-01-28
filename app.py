@@ -262,6 +262,7 @@ def get_market_dictionary():
           collateralAsset { symbol }
           state {
             supplyApy
+            utilization
             supplyAssets
             borrowAssets
             supplyAssetsUsd
@@ -366,8 +367,8 @@ def fetch_live_market_details(selected_df):
 
 def fetch_user_positions(user_address):
     """
-    Fetches all active supply positions for a specific user address across all chains.
-    Returns a dict: {market_id: supply_usd_balance}
+    FIXED: Queries 'supplyAssetsUsd' inside the 'state' object 
+    to match the current Morpho API schema.
     """
     user_address = user_address.lower()
     query = """
@@ -375,7 +376,9 @@ def fetch_user_positions(user_address):
       marketPositions(first: 100, where: { userAddress_in: $user }) {
         items {
           market { uniqueKey }
-          supplyAssetsUsd
+          state { 
+            supplyAssetsUsd 
+          }
         }
       }
     }
@@ -383,20 +386,25 @@ def fetch_user_positions(user_address):
     
     positions = {}
     try:
-        # We fetch simply using the main endpoint; Morpho API aggregates chains usually
         variables = {"user": [user_address]}
         resp = requests.post(MORPHO_API_URL, json={'query': query, 'variables': variables})
         data = resp.json()
         
+        # DEBUG: Uncomment this if you still see issues to see raw API errors
+        # if 'errors' in data: print(f"GraphQL Errors: {data['errors']}")
+
         if 'data' in data and 'marketPositions' in data['data']:
             items = data['data']['marketPositions']['items']
             for item in items:
                 m_id = item['market']['uniqueKey']
-                bal = float(item['supplyAssetsUsd'])
-                if bal > 0.01: # Filter dust
-                    positions[m_id] = bal
+                # ACCESS DATA VIA ['state']
+                state = item.get('state')
+                if state:
+                    bal = float(state.get('supplyAssetsUsd', 0))
+                    if bal > 0.01: # Filter dust
+                        positions[m_id] = bal
     except Exception as e:
-        st.error(f"Error fetching user positions: {e}")
+        st.error(f"Error parsing user positions: {e}")
         
     return positions
 
