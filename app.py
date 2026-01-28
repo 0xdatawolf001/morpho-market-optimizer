@@ -474,11 +474,14 @@ def fetch_historical_flows(market_ids_and_chains):
 # ==========================================
 
 class RebalanceOptimizer:
-    def __init__(self, total_budget, market_list, max_dominance_pct=100.0, max_port_alloc_pct=100.0):
+    def __init__(self, total_budget, market_list, max_dominance_pct=100.0, max_port_alloc_pct=100.0, max_supply_pct=100.0, max_borrow_pct=100.0):
         self.total_budget = total_budget 
         self.markets = market_list
         self.max_dominance_ratio = max_dominance_pct / 100.0 
         self.max_port_alloc_ratio = max_port_alloc_pct / 100.0
+        # NEW: Store supply and borrow dominance ratios
+        self.max_supply_ratio = max_supply_pct / 100.0
+        self.max_borrow_ratio = max_borrow_pct / 100.0
         
         self.yield_trace = []    
         self.frontier_trace = [] 
@@ -514,7 +517,6 @@ class RebalanceOptimizer:
         return rate_per_second_to_apy(new_supply_rate)
 
     def _calculate_metrics(self, x):
-        # We assume x is already budget-compliant via the SLSQP constraint
         total_yield = 0
         for i, alloc in enumerate(x):
             total_yield += (alloc * self.simulate_apy(self.markets[i], alloc))
@@ -542,7 +544,6 @@ class RebalanceOptimizer:
     def objective_frontier(self, x):
         _, y_val, div_val = self._calculate_metrics(x)
         self._record_attempt(y_val, div_val)
-        # Maximize (Yield * Diversity)
         score = (y_val + 1e-9) * (div_val + 1e-9)
         self.frontier_trace.append(y_val) 
         return -score 
@@ -562,7 +563,6 @@ class RebalanceOptimizer:
         return -liq_score
 
     def objective_whale(self, x):
-        # Whale Shield uses pure yield objective but operates on 'whale_bounds'
         _, y_val, div_val = self._calculate_metrics(x)
         self._record_attempt(y_val, div_val)
         self.whale_trace.append(y_val)
@@ -576,43 +576,68 @@ class RebalanceOptimizer:
         whale_bounds = []
         port_cap_usd = self.total_budget * self.max_port_alloc_ratio
         
-        # Whale Shield Limit
+        # Available Liquidity factor (Whale Shield only)
         if self.max_dominance_ratio >= 0.999:
             whale_cap_factor = 1e12 
         else:
             whale_cap_factor = self.max_dominance_ratio / (1.0 - self.max_dominance_ratio)
 
+        # NEW: Supply dominance factor (Global)
+        if self.max_supply_ratio >= 0.999:
+            supply_cap_factor = 1e12
+        else:
+            supply_cap_factor = self.max_supply_ratio / (1.0 - self.max_supply_ratio)
+
         for m in self.markets:
             current_bal = m.get('existing_balance_usd', 0.0)
-            std_lower, std_upper = 0.0, min(self.total_budget, port_cap_usd)
+            token_price = m.get('Price USD', 0)
+            multiplier = 10**m.get('Decimals', 18)
+            
+            # 1. Calc Metadata for Caps
+            user_existing_wei = (current_bal / token_price) * multiplier if token_price > 0 else 0
+            # Total Supply minus User
+            base_supply_wei = max(0, m.get('raw_supply', 0) - user_existing_wei)
+            base_supply_usd = (base_supply_wei / multiplier) * token_price if token_price > 0 else 0
+            # Total Borrow
+            total_borrow_usd = (m.get('raw_borrow', 0) / multiplier) * token_price if token_price > 0 else 0
+            
+            # 2. Global Caps (Applied to ALL strategies)
+            # Cap based on Portfolio Size
+            cap_port = min(self.total_budget, port_cap_usd)
+            # Cap based on Total Supply %: UserSupply / (UserSupply + BaseSupply) <= MaxRatio
+            cap_supply = max(0.0, base_supply_usd * supply_cap_factor)
+            # Cap based on Total Borrow %: UserSupply / TotalBorrow <= MaxRatio
+            cap_borrow = max(0.0, total_borrow_usd * self.max_borrow_ratio)
+            
+            # The strictly allowed upper bound for ALL strategies
+            global_upper = min(cap_port, cap_supply, cap_borrow)
+
+            std_lower, std_upper = 0.0, global_upper
             
             if m.get('force_exit', False):
                 std_lower = std_upper = 0.0
             else:
-                if m.get('prevent_outflows', False): std_lower = current_bal
-                if m.get('prevent_inflows', False): std_upper = min(current_bal, std_upper)
+                if m.get('prevent_outflows', False): std_lower = min(current_bal, global_upper)
+                if m.get('prevent_inflows', False): std_upper = min(current_bal, global_upper)
 
             standard_bounds.append((std_lower, max(std_lower, std_upper)))
             
-            # Liquidity calculations for Whale Shield
-            token_price = m.get('Price USD', 0)
-            multiplier = 10**m.get('Decimals', 18)
-            user_existing_wei = (current_bal / token_price) * multiplier if token_price > 0 else 0
+            # 3. Liquidity Shield Cap (Only applied to Whale/Liquid strategies)
             base_available_usd = ((max(0, m.get('raw_supply', 0) - m.get('raw_borrow', 0)) - user_existing_wei) / multiplier) * token_price if token_price > 0 else 0
-            
             liq_shield_cap = max(0, base_available_usd * whale_cap_factor)
+            
+            # Whale bounds inherit the global restrictions but add the liquidity shield
             whale_upper = min(std_upper, liq_shield_cap)
             if std_lower > whale_upper: whale_upper = std_lower
             whale_bounds.append((std_lower, max(std_lower, whale_upper)))
 
-        # Starting Guess: Proportional to current bounds
         x0 = np.array([(b[0] + b[1]) / 2.0 for b in standard_bounds])
         if np.sum(x0) > 0: x0 = x0 * (self.total_budget / np.sum(x0))
 
         constraints = ({'type': 'eq', 'fun': lambda x: np.sum(x) - self.total_budget})
-        # Note: We use a slightly more relaxed tolerance to help the solver move away from local minima
         options = {'maxiter': 2000, 'ftol': 1e-8}
 
+        print(f"DEBUG: Optimization starting. Total Budget: ${self.total_budget:,.2f}")
         res_yield = minimize(self.objective_yield, x0, method='SLSQP', bounds=standard_bounds, constraints=constraints, options=options)
         res_frontier = minimize(self.objective_frontier, x0, method='SLSQP', bounds=standard_bounds, constraints=constraints, options=options)
         res_liq = minimize(self.objective_liquidity, x0, method='SLSQP', bounds=whale_bounds, constraints=constraints, options=options)
@@ -661,8 +686,8 @@ with st.form("market_filter_form"):
     st.markdown("---")
     # Metric Range Row 1: APY
     r1_c1, r1_c2 = st.columns(2)
-    m_apy_in = r1_c1.number_input("Min APY %", 0.0, 1000000.0, 0.0)
-    x_apy_in = r1_c2.number_input("Max APY %", 0.0, 1000000.0, 1000.0)
+    m_apy_in = r1_c1.number_input("Min APY %", min_value=0.0, value = 0.0)
+    x_apy_in = r1_c2.number_input("Max APY %", min_value=0.0, value=1000.0)
     
     # Metric Range Row 2: Utilization
     r2_c1, r2_c2 = st.columns(2)
@@ -913,41 +938,59 @@ with col_scope:
 with col_param:
     st.subheader("3. Parameters")
     
-    rebalance_scope = st.selectbox(
-        "Optimization Constraint",
-        options=[
-            "1) Full Optimization",
-            "2) Within Chain and Same Loan Token",
-            "3) Within Chain and Different Loan Token",
-            "4) Across Chain and Same Loan Token"
-        ],
-        index=0,
-        help="Strictly limits where funds can move. The optimizer is run independently for each group, making it impossible to violate the constraint."
-    )
+    # Organize parameters into logical tabs to save vertical space
+    tab_scope, tab_dominance, tab_safety = st.tabs(["🌐 Scope & Budget", "🐳 Dominance", "🛡️ Safety"])
 
-    new_cash = st.number_input(
-        "Additional New Cash / Withdrawal (USD)", 
-        value=0.0, 
-        help="Positive = Add Capital. Negative = Withdraw. (Distributed proportionally to existing silos)."
-    )
+    with tab_scope:
+        rebalance_scope = st.selectbox(
+            "Optimization Constraint",
+            options=[
+                "1) Full Optimization",
+                "2) Within Chain and Same Loan Token",
+                "3) Within Chain and Different Loan Token",
+                "4) Across Chain and Same Loan Token"
+            ],
+            index=0,
+            help="Strictly limits where funds can move. The optimizer is run independently for each group."
+        )
 
-    max_port_alloc = st.number_input(
-        "Max Portfolio Allocation %",
-        value=100.0,
-        help="Safety limit: No single market can exceed this % of the total portfolio."
-    )
+        new_cash = st.number_input(
+            "Additional New Cash / Withdrawal (USD)", 
+            value=0.0, 
+            help="Positive = Add Capital. Negative = Withdraw. (Distributed proportionally to existing silos)."
+        )
 
-    max_dominance = st.number_input(
-        "Whale Shield: Max Dominance %",
-        value=30.0,
-        help="Liquidity limit: You will never own more than this % of available liquidity."
-    )
+        min_move_thresh = st.number_input(
+            "Min Rebalance Threshold ($)", 
+            value=0.0, 
+            help='The threshold where the optimizer only allocates if it crosses this amount. Prevents "Dust" moves.'
+        )
 
-    min_move_thresh = st.number_input(
-        "Min Rebalance Threshold ($)", 
-        value=0.0, 
-        help='The threshold where the optimizer only allocates if it crosses this amount'
-    )
+    with tab_dominance:
+        max_supply_dom = st.number_input(
+            "Max Supply Dominance %",
+            value=10.0,
+            help="Constraint: You will never represent more than X% of the market's total supply (including your entry)."
+        )
+
+        max_borrow_dom = st.number_input(
+            "Max Borrow Dominance %",
+            value=10.0,
+            help="Constraint: Your supply will never exceed X% of the market's total borrows (Debt pool)."
+        )
+
+    with tab_safety:
+        max_port_alloc = st.number_input(
+            "Max Portfolio Allocation %",
+            value=100.0,
+            help="Safety limit: No single market can exceed this % of your TOTAL wealth."
+        )
+
+        max_dominance = st.number_input(
+            "Whale Shield: Max Liquidity %",
+            value=30.0,
+            help="Liquidity limit: You will never own more than this % of available (unused) liquidity in a pool."
+        )
 
 if not df_selected.empty:
 
@@ -1216,8 +1259,15 @@ if not df_selected.empty:
             else:
                 adjusted_max_alloc_pct = 100.0
 
-            # RUN OPTIMIZER ON SUBSET with ADJUSTED CAP
-            opt = RebalanceOptimizer(silo_budget, silo_markets, max_dominance, adjusted_max_alloc_pct)
+            # RUN OPTIMIZER ON SUBSET with ADJUSTED CAP and NEW DOMINANCE LIMITS
+            opt = RebalanceOptimizer(
+                total_budget=silo_budget, 
+                market_list=silo_markets, 
+                max_dominance_pct=max_dominance, 
+                max_port_alloc_pct=adjusted_max_alloc_pct,
+                max_supply_pct=max_supply_dom,
+                max_borrow_pct=max_borrow_dom
+            )
             r_y, r_f, r_l, r_w = opt.optimize()
 
             # Map results back to the Global Indices
