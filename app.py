@@ -253,7 +253,7 @@ def get_market_dictionary():
           uniqueKey
           whitelisted
           loanAsset { 
-            address  # <--- ADDED THIS
+            address 
             symbol 
             decimals 
             priceUsd 
@@ -282,8 +282,7 @@ def get_market_dictionary():
         json_data = resp.json()
         
         if 'data' not in json_data:
-            st.error(f"API Error: {json_data.get('errors', 'Unknown Error')}")
-            st.stop()
+            break
             
         items = json_data['data']['markets']['items']
         if not items: break
@@ -297,14 +296,25 @@ def get_market_dictionary():
     for m in all_items:
         loan = m.get('loanAsset') or {}
         state = m.get('state') or {}
+        collateral = m.get('collateralAsset') or {}
         
-        # FIX: Strict data validation. If loan metadata or price is missing, skip the market.
+        # --- FIX: BE MORE FORGIVING WITH DATA ---
         price_usd = loan.get('priceUsd')
+        if price_usd is None or price_usd <= 0:
+            # If it's a known stable but price is missing, default to 1.0 to prevent skip
+            symbol = str(loan.get('symbol', '')).upper()
+            if any(s in symbol for s in ['USD', 'DAI', 'PYUSD', 'USDS', 'USDT']):
+                price_usd = 1.0
+            else:
+                price_usd = 0.0 # Will still likely be filtered by math, but won't crash
+
         loan_address = loan.get('address')
         decimals = loan.get('decimals')
+        collateral_symbol = collateral.get('symbol') or "Unknown" # Don't skip if missing
         
-        if price_usd is None or price_usd <= 0 or not loan_address or decimals is None:
-            continue # Skip markets with "Ghost Data"
+        # We only skip if the data is so broken we can't identify the token or its decimals
+        if not loan_address or decimals is None:
+            continue 
 
         def safe_float(value, default=0.0):
             if value is None: return default
@@ -319,7 +329,7 @@ def get_market_dictionary():
             "Chain": CHAIN_ID_TO_NAME.get(loan.get('chain', {}).get('id'), "Other"),
             "Loan Token": loan.get('symbol'),
             "Loan Address": loan_address, 
-            "Collateral": (m.get('collateralAsset') or {}).get('symbol'),
+            "Collateral": collateral_symbol,
             "Decimals": int(decimals),
             "Price USD": float(price_usd),
             "ChainID": loan.get('chain', {}).get('id'),
@@ -330,9 +340,10 @@ def get_market_dictionary():
             "Available Liquidity (USD)": supply_usd - borrow_usd,
             "Whitelisted": m.get('whitelisted', False)
         })
+    
+    # --- FIX: Changed .drop_duplicates(keep=False) to (keep='first') ---
     return (pd.DataFrame(processed) 
-              .drop_duplicates(subset=["Market ID"], keep=False) 
-              .query('Collateral.notna() & (Collateral != "") & (Collateral != " ")') 
+              .drop_duplicates(subset=["Market ID"], keep='first') 
               .sort_values('Total Supply (USD)', ascending=False)
            )
 
