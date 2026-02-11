@@ -796,8 +796,10 @@ with col_scope:
 
     def handle_text_change():
         """Extracts unique IDs only and reconstructs the UI text with proper headers/labels."""
-        raw_text = st.session_state.portfolio_input_text
-        if not raw_text.strip():
+        # FIX: Use .get() instead of direct attribute access to avoid AttributeError
+        raw_text = st.session_state.get("portfolio_input_text", "")
+        
+        if not raw_text or not raw_text.strip():
             return
 
         # 1. Extract all unique valid Market IDs (lowercase)
@@ -812,40 +814,39 @@ with col_scope:
                 found_ids.append(mid)
                 seen.add(mid)
 
-        # 2. Separate into Manual vs Wallet based on existing cache
-        current_text = st.session_state.portfolio_input_text
-        
+        # 2. Separate into Manual vs Wallet based on existing headers
         manual_lines = []
         wallet_lines = []
         
-        # Simple parse to preserve section location
-        if WALLET_SEP in current_text:
-            parts = current_text.split(WALLET_SEP)
+        if WALLET_SEP in raw_text:
+            parts = raw_text.split(WALLET_SEP)
             manual_part = parts[0]
             wallet_part = parts[1]
         else:
-            manual_part = current_text
+            manual_part = raw_text
             wallet_part = ""
 
-        # Re-enrich manual part
-        for line in manual_part.split('\n'):
-            clean = line.split('--')[0].strip()
-            mid = extract_market_id_from_monarch_link(clean).lower()
-            if mid.startswith('0x'):
-                row = df_all[df_all['Market ID'].str.lower() == mid]
-                label = f" -- {row.iloc[0]['Loan Token']}/{row.iloc[0]['Collateral']}" if not row.empty else ""
-                manual_lines.append(f"{mid}{label}")
+        # Helper to format lines
+        def format_line(part_text):
+            lines = []
+            for line in part_text.split('\n'):
+                clean = line.split('--')[0].strip()
+                mid = extract_market_id_from_monarch_link(clean).lower()
+                if mid.startswith('0x'):
+                    # Ensure df_all is accessible; if not, just use the ID
+                    label = ""
+                    if 'market_dict' in st.session_state:
+                        df = st.session_state.market_dict
+                        row = df[df['Market ID'].str.lower() == mid]
+                        if not row.empty:
+                            label = f" -- {row.iloc[0]['Loan Token']}/{row.iloc[0]['Collateral']}"
+                    lines.append(f"{mid}{label}")
+            return lines
 
-        # Re-enrich wallet part
-        for line in wallet_part.split('\n'):
-            clean = line.split('--')[0].strip()
-            mid = extract_market_id_from_monarch_link(clean).lower()
-            if mid.startswith('0x'):
-                row = df_all[df_all['Market ID'].str.lower() == mid]
-                label = f" -- {row.iloc[0]['Loan Token']}/{row.iloc[0]['Collateral']}" if not row.empty else ""
-                wallet_lines.append(f"{mid}{label}")
+        manual_lines = format_line(manual_part)
+        wallet_lines = format_line(wallet_part)
 
-        # 3. Reconstruct string
+        # 3. Reconstruct string and update session state
         new_parts = []
         if manual_lines:
             new_parts.append(MANUAL_SEP)
@@ -856,6 +857,7 @@ with col_scope:
             new_parts.append(WALLET_SEP)
             new_parts.extend(wallet_lines)
 
+        # Update the state directly
         st.session_state.portfolio_input_text = "\n".join(new_parts).strip()
 
     if scan_clicked:
