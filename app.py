@@ -743,10 +743,13 @@ df_filtered = df_filtered[
     (df_filtered['Available Liquidity (USD)'] >= m_avail_usd)
 ]
 
-# Add the URL column
-df_filtered['Link To Market'] = df_filtered.apply(
-    lambda x: f"https://www.monarchlend.xyz/market/{int(x['ChainID'])}/{x['Market ID']}", axis=1
-)
+if not df_filtered.empty:
+    df_filtered['Link To Market'] = [
+        f"https://www.monarchlend.xyz/market/{int(row['ChainID'])}/{row['Market ID']}" 
+        for _, row in df_filtered.iterrows()
+    ]
+else:
+    df_filtered['Link To Market'] = []
 
 st.dataframe(
     df_filtered, 
@@ -1029,9 +1032,10 @@ if not df_selected.empty:
         df_selected['Prevent Inflows'] = False
 
     # Add the URL column
-    df_selected['Link To Market'] = df_selected.apply(
-        lambda x: f"https://www.monarchlend.xyz/market/{int(x['ChainID'])}/{x['Market ID']}", axis=1
-    )
+    df_selected['Link To Market'] = [
+        f"https://www.monarchlend.xyz/market/{int(row['ChainID'])}/{row['Market ID']}" 
+        for _, row in df_selected.iterrows()
+    ]
 
     df_selected = df_selected.sort_values(by='Existing Balance (USD)', ascending=False)
 
