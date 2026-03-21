@@ -3,7 +3,7 @@ import requests
 import pandas as pd
 import numpy as np
 import math
-from scipy.optimize import minimize, differential_evolution
+from scipy.optimize import minimize
 import time
 from datetime import datetime, timedelta, timezone
 import altair as alt
@@ -732,7 +732,7 @@ if sel_colls:
     df_filtered = df_filtered[df_filtered['Collateral'].isin(sel_colls)]
 
 if show_whitelisted: 
-    df_filtered = df_filtered[df_filtered['Whitelisted'] == True]
+    df_filtered = df_filtered[df_filtered['Whitelisted']]
 
 df_filtered = df_filtered[
     (df_filtered['Supply APY'] >= (m_apy_in / 100.0)) & 
@@ -1012,7 +1012,7 @@ with col_param:
 
         max_dominance = st.number_input(
             "Whale Shield: Max Liquidity %",
-            value=30.0,
+            value=50.0,
             help="Liquidity limit: You will never own more than this % of available (unused) liquidity in a pool."
         )
 
