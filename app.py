@@ -246,9 +246,10 @@ def get_lifi_quote(from_chain, to_chain, from_token, to_token, amount_atomic, us
 # ==========================================
 
 def get_market_dictionary():
+    # 1. Modified the query to accept the $where variable
     query = """
-    query GetAllMarkets($first: Int, $skip: Int) {
-      markets(first: $first, skip: $skip) {
+    query GetAllMarkets($first: Int, $skip: Int, $where: MarketFilters) {
+      markets(first: $first, skip: $skip, where: $where) {
         items {
           uniqueKey
           whitelisted
@@ -272,13 +273,28 @@ def get_market_dictionary():
       }
     }
     """
+    
+    # 2. Define your pre-selected Chain IDs
+    # Ethereum: 1, Base: 8453, Arbitrum: 42161, HyperEVM: 999
+    TARGET_CHAINS = [1, 8453, 42161, 999]
+    
     all_items = []
     skip = 0
     load_status = st.empty()
     
     while True:
         load_status.info(f"⏳ Retrieving Morpho Markets... {len(all_items)} found. Please wait...")
-        resp = requests.post(MORPHO_API_URL, json={'query': query, 'variables': {"first": BATCH_SIZE, "skip": skip}})
+        
+        # 3. Pass the chainId_in filter into the variables
+        variables = {
+            "first": BATCH_SIZE, 
+            "skip": skip,
+            "where": {
+                "chainId_in": TARGET_CHAINS
+            }
+        }
+        
+        resp = requests.post(MORPHO_API_URL, json={'query': query, 'variables': variables})
         json_data = resp.json()
         
         if 'data' not in json_data:
@@ -298,21 +314,18 @@ def get_market_dictionary():
         state = m.get('state') or {}
         collateral = m.get('collateralAsset') or {}
         
-        # --- FIX: BE MORE FORGIVING WITH DATA ---
         price_usd = loan.get('priceUsd')
         if price_usd is None or price_usd <= 0:
-            # If it's a known stable but price is missing, default to 1.0 to prevent skip
             symbol = str(loan.get('symbol', '')).upper()
             if any(s in symbol for s in ['USD', 'DAI', 'PYUSD', 'USDS', 'USDT']):
                 price_usd = 1.0
             else:
-                price_usd = 0.0 # Will still likely be filtered by math, but won't crash
+                price_usd = 0.0
 
         loan_address = loan.get('address')
         decimals = loan.get('decimals')
-        collateral_symbol = collateral.get('symbol') or "Unknown" # Don't skip if missing
+        collateral_symbol = collateral.get('symbol') or "Unknown"
         
-        # We only skip if the data is so broken we can't identify the token or its decimals
         if not loan_address or decimals is None:
             continue 
 
@@ -324,15 +337,18 @@ def get_market_dictionary():
         supply_usd = safe_float(state.get('supplyAssetsUsd'))
         borrow_usd = safe_float(state.get('borrowAssetsUsd'))
         
+        # This uses your existing CHAIN_ID_TO_NAME dictionary
+        chain_id = loan.get('chain', {}).get('id')
+        
         processed.append({
             "Market ID": m['uniqueKey'],
-            "Chain": CHAIN_ID_TO_NAME.get(loan.get('chain', {}).get('id'), "Other"),
+            "Chain": CHAIN_ID_TO_NAME.get(chain_id, "Other"),
             "Loan Token": loan.get('symbol'),
             "Loan Address": loan_address, 
             "Collateral": collateral_symbol,
             "Decimals": int(decimals),
             "Price USD": float(price_usd),
-            "ChainID": loan.get('chain', {}).get('id'),
+            "ChainID": chain_id,
             "Supply APY": safe_float(state.get('supplyApy')),
             "Utilization": (safe_float(state.get('borrowAssets')) / safe_float(state.get('supplyAssets'))) if safe_float(state.get('supplyAssets')) > 0 else 0,
             "Total Supply (USD)": supply_usd,
@@ -341,7 +357,6 @@ def get_market_dictionary():
             "Whitelisted": m.get('whitelisted', False)
         })
     
-    # --- FIX: Changed .drop_duplicates(keep=False) to (keep='first') ---
     return (pd.DataFrame(processed) 
               .drop_duplicates(subset=["Market ID"], keep='first') 
               .sort_values('Total Supply (USD)', ascending=False)
