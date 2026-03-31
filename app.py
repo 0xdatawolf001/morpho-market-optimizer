@@ -27,7 +27,6 @@ RETRY_BACKOFF = 2 # Seconds
 # Chart Performance Constants
 MAX_SCATTER_PLOT_POINTS = 5000 # Max points for the Efficiency Frontier plot
 MAX_LINE_PLOT_POINTS_PER_STRATEGY = 1000 # Max points per strategy for the Solver Convergence plot
-DEMAND_TREND_CHART_HEIGHT = 800 # Increased for better vertical visibility
 
 # For text box
 # Separator Constant
@@ -274,8 +273,8 @@ def get_market_dictionary():
     }
     """
     
-    # 2. Define your pre-selected Chain IDs (Updated to match full documentation list)
-    # TARGET_CHAINS = [1, 10, 130, 137, 143, 8453, 42161, 999, 747474, 988, 98866]
+    # 2. Define your pre-selected Chain IDs
+    # Ethereum: 1, Base: 8453, Arbitrum: 42161, HyperEVM: 999
     TARGET_CHAINS = [1, 8453, 42161, 999]
     
     all_items = []
@@ -285,7 +284,7 @@ def get_market_dictionary():
     while True:
         load_status.info(f"⏳ Retrieving Morpho Markets... {len(all_items)} found. Please wait...")
         
-        # 3. Pass the chainId_in and whitelisted: true filter for speed
+        # 3. Pass the chainId_in filter into the variables
         variables = {
             "first": BATCH_SIZE, 
             "skip": skip,
@@ -314,12 +313,13 @@ def get_market_dictionary():
         state = m.get('state') or {}
         collateral = m.get('collateralAsset') or {}
         
-        def safe_float(value, default=0.0):
-            if value is None: return default
-            try: return float(value)
-            except (ValueError, TypeError): return default
-
-        price_usd = safe_float(loan.get('priceUsd'), 0.0)
+        price_usd = loan.get('priceUsd')
+        if price_usd is None or price_usd <= 0:
+            symbol = str(loan.get('symbol', '')).upper()
+            if any(s in symbol for s in ['USD', 'DAI', 'PYUSD', 'USDS', 'USDT']):
+                price_usd = 1.0
+            else:
+                price_usd = 0.0
 
         loan_address = loan.get('address')
         decimals = loan.get('decimals')
@@ -361,79 +361,33 @@ def get_market_dictionary():
               .sort_values('Total Supply (USD)', ascending=False)
            )
 
-def fetch_live_market_details(selected_df, my_bar=None):
-    """
-    Optimized: Fetches all market details in a single bulk request.
-    """
-    if selected_df.empty:
-        return []
-    
-    market_ids = selected_df['Market ID'].tolist()
-    
-    query = """
-    query GetBulkMarketData($where: MarketFilters) {
-        markets(where: $where) {
-            items {
-                uniqueKey
-                state { 
-                    supplyAssets 
-                    borrowAssets 
-                    fee 
-                    borrowApy 
-                    supplyApy 
-                }
+def fetch_live_market_details(selected_df):
+    details = []
+    my_bar = st.progress(0, text="Fetching real-time yields...")
+    for i, (_, row) in enumerate(selected_df.iterrows()):
+        query = """
+        query GetMarketData($uniqueKey: String!, $chainId: Int!) {
+            marketByUniqueKey(uniqueKey: $uniqueKey, chainId: $chainId) {
+                state { supplyAssets borrowAssets fee borrowApy supplyApy }
             }
         }
-    }
-    """
-    
-    variables = {"where": {"uniqueKey_in": market_ids}}
-    details = []
-
-    try:
-        resp = requests.post(MORPHO_API_URL, json={'query': query, 'variables': variables}, timeout=30)
-        resp.raise_for_status() # Check for HTTP errors
-        
-        raw_data = resp.json()
-        items = raw_data.get('data', {}).get('markets', {}).get('items', [])
-        
-        # Create a lookup map for the bulk results
-        lookup = {item['uniqueKey']: item['state'] for item in items if item.get('state')}
-        
-        for _, row in selected_df.iterrows():
-            m_id = row['Market ID']
-            state = lookup.get(m_id)
-            
-            if state:
-                # Morpho values are strings (BigInts), convert safely
-                sup = float(state['supplyAssets'])
-                bor = float(state['borrowAssets'])
-                util = bor / sup if sup > 0 else 0
-                
-                # IRM logic
-                curr_rate_sec = apy_to_rate_per_second(float(state['borrowApy']))
-                mult = compute_curve_multiplier(util)
-                
-                details.append({
-                    **row.to_dict(),
-                    'raw_supply': sup, 
-                    'raw_borrow': bor,
-                    'fee': float(state['fee']) / WAD,
-                    'rate_at_target': (curr_rate_sec / mult if mult > 0 else 0),
-                    'current_supply_apy': float(state['supplyApy'])
-                })
-                
-    except Exception as e:
-        # If using Streamlit:
-        import streamlit as st
-        st.error(f"Error fetching bulk market details: {e}")
-        return []
-    
-    finally:
-        # This ensures the progress bar is cleared whether the try succeeds or fails
-        if my_bar is not None:
-            my_bar.empty()
-
+        """
+        r = requests.post(MORPHO_API_URL, json={'query': query, 'variables': {"uniqueKey": row['Market ID'], "chainId": int(row['ChainID'])}}).json().get('data', {}).get('marketByUniqueKey')
+        if r:
+            state = r['state']
+            sup, bor = float(state['supplyAssets']), float(state['borrowAssets'])
+            util = bor / sup if sup > 0 else 0
+            curr_rate_sec = apy_to_rate_per_second(float(state['borrowApy']))
+            mult = compute_curve_multiplier(util)
+            details.append({
+                **row.to_dict(),
+                'raw_supply': sup, 'raw_borrow': bor,
+                'fee': float(state['fee']) / WAD,
+                'rate_at_target': (curr_rate_sec / mult if mult > 0 else 0),
+                'current_supply_apy': float(state['supplyApy'])
+            })
+        my_bar.progress((i + 1) / len(selected_df))
+    my_bar.empty()
     return details
 
 def fetch_user_positions(user_address):
@@ -478,75 +432,6 @@ def fetch_user_positions(user_address):
         st.error(f"Error parsing user positions: {e}")
         
     return positions
-
-def fetch_historical_flows(market_ids_and_chains):
-    """
-    Fetches 30-day history for supplyShares and borrowShares.
-    Calculates a Balanced Demand Index using the Geometric Mean: sqrt(Supply * Borrow).
-    This penalizes one-sided markets and rewards synergy between lenders and borrowers.
-    """
-    now = datetime.now(timezone.utc)
-    start_time = int((now - timedelta(days=30)).timestamp())
-    
-    historical_data = []
-    hist_bar = st.progress(0, text="Analyzing 30-day balanced demand trends...")
-    
-    for idx, m in enumerate(market_ids_and_chains):
-        query = """
-        query GetMarketHistory($uniqueKey: String!, $chainId: Int!, $options: TimeseriesOptions) {
-            marketByUniqueKey(uniqueKey: $uniqueKey, chainId: $chainId) {
-                historicalState {
-                    supplyShares(options: $options) { x y }
-                    borrowShares(options: $options) { x y }
-                }
-            }
-        }
-        """
-        
-        variables = {
-            "uniqueKey": m['uniqueKey'],
-            "chainId": int(m['chainId']),
-            "options": {"startTimestamp": start_time, "interval": "DAY"}
-        }
-        
-        try:
-            resp = requests.post(MORPHO_API_URL, json={'query': query, 'variables': variables})
-            data = resp.json()
-            
-            if 'data' in data and data['data'].get('marketByUniqueKey'):
-                hist = data['data']['marketByUniqueKey']['historicalState']
-                df_sup = pd.DataFrame(hist['supplyShares'])
-                df_bor = pd.DataFrame(hist['borrowShares'])
-                
-                if not df_sup.empty and not df_bor.empty:
-                    df_merged = pd.merge(df_sup, df_bor, on='x', suffixes=('_sup', '_bor'))
-                    df_merged['y_sup'] = df_merged['y_sup'].astype(float)
-                    df_merged['y_bor'] = df_merged['y_bor'].astype(float)
-                    
-                    # MATH UPDATE: Geometric Mean ensures both Supply and Borrow must exist to score
-                    df_merged['balanced_activity'] = np.sqrt(df_merged['y_sup'] * df_merged['y_bor'])
-                    df_merged = df_merged.sort_values('x', ascending=True)
-                    
-                    # Find first day with actual activity to avoid 0-division baseline
-                    active_days = df_merged[df_merged['balanced_activity'] > 0]
-                    if not active_days.empty:
-                        initial_activity = active_days['balanced_activity'].iloc[0]
-                        df_merged['indexed_demand'] = df_merged['balanced_activity'] / initial_activity
-                    else:
-                        df_merged['indexed_demand'] = 1.0
-                        
-                    short_id = m['uniqueKey'][0:6]
-                    unique_label = f"{m['name']} [{short_id}]"
-                    df_merged['Market'] = unique_label
-                    df_merged['date'] = pd.to_datetime(df_merged['x'], unit='s')
-                    historical_data.append(df_merged[['date', 'Market', 'indexed_demand']])
-        except Exception as e:
-            st.error(f"Error fetching history for {m['uniqueKey']}: {e}")
-            
-        hist_bar.progress((idx + 1) / len(market_ids_and_chains))
-        
-    hist_bar.empty()
-    return pd.concat(historical_data) if historical_data else pd.DataFrame()
 
 # ==========================================
 # 3. OPTIMIZER
@@ -1249,13 +1134,6 @@ if not df_selected.empty:
     if st.button("🚀 Run Optimization", type="primary", width='stretch'):
         # FIX: Force a final sync of the portfolio editor before calculating
         sync_portfolio_edits()
-
-        # 1. Clear State
-        if 'hist_demand_df' in st.session_state:
-            del st.session_state.hist_demand_df
-        
-        # Reset the demand trend trigger so it doesn't auto-run on new results
-        st.session_state.run_demand_trend = False
         
         # 2. Prepare Data
         market_data_list = fetch_live_market_details(df_selected)
@@ -1602,122 +1480,6 @@ if not df_selected.empty:
             st.altair_chart(bar_chart, use_container_width=True)
         else:
             st.info("No significant allocations.")
-
-        st.divider()
-
-        # --- FULL WIDTH: DEMAND TRENDS CHART ---
-        st.subheader("📈 30-Day Balanced Demand Trend")
-        st.caption("Growth of the square root of Supply x Borrow relative to start of period. Rewards balanced market synergy and penalizes ghost/diluted pools.")
-
-        # Initialize trigger state
-        if 'run_demand_trend' not in st.session_state:
-            st.session_state.run_demand_trend = False
-
-        # Red Primary Button for Trend Analysis
-        if not st.session_state.run_demand_trend:
-            if st.button("🔍 Run 30-Day Demand Trend Analysis", type="primary", use_container_width=True):
-                st.session_state.run_demand_trend = True
-                st.rerun()
-        
-        if st.session_state.run_demand_trend:
-            # 1. Prepare list for fetching
-            targets_for_history = []
-            for m in market_data_list:
-                targets_for_history.append({
-                    "uniqueKey": m['Market ID'],
-                    "chainId": m['ChainID'],
-                    "name": f"{m['Loan Token']}/{m['Collateral']}"
-                })
-            
-            # 2. Fetch Data (Cached)
-            if 'hist_demand_df' not in st.session_state:
-                st.session_state.hist_demand_df = fetch_historical_flows(targets_for_history)
-            
-            df_history = st.session_state.hist_demand_df
-            
-            if not df_history.empty:
-                # --- FILTER LOGIC ---
-                trend_summary = df_history.sort_values('date').groupby('Market')['indexed_demand'].last()
-                
-                d_col_empty, d_col_filter = st.columns([2, 1])
-                with d_col_filter:
-                    filter_mode = st.radio(
-                        "Filter Trends:",
-                        ["All", "Growth (> 1.0)", "Decay (≤ 1.0)"],
-                        horizontal=True,
-                        key="trend_filter_radio"
-                    )
-
-                # Apply Filter
-                markets_to_show = trend_summary.index.tolist()
-                
-                if "Growth" in filter_mode:
-                    markets_to_show = trend_summary[trend_summary > 1.0].index.tolist()
-                elif "Decay" in filter_mode:
-                    markets_to_show = trend_summary[trend_summary <= 1.0].index.tolist()
-                
-                df_hist_filtered = df_history[df_history['Market'].isin(markets_to_show)]
-
-                if not df_hist_filtered.empty:
-                    # --- INTERACTIVE ELEMENTS ---
-                    selection = alt.selection_point(fields=['Market'], bind='legend')
-                    hover = alt.selection_point(
-                        fields=['date'], 
-                        nearest=True, 
-                        on='mouseover', 
-                        empty=False, 
-                        clear='mouseout'
-                    )
-
-                    # 3. Base Line Chart
-                    base = alt.Chart(df_hist_filtered).encode(
-                        x=alt.X('date:T', title=None, axis=alt.Axis(format='%b %d')),
-                        y=alt.Y('indexed_demand:Q', 
-                                title='Growth Index', 
-                                axis=alt.Axis(format='.2f', grid=True),
-                                scale=alt.Scale(zero=False)), 
-                        color=alt.Color('Market:N', legend=alt.Legend(
-                            orient='bottom', 
-                            title='Market ID & Pair',
-                            columns=4,
-                            labelLimit=0,
-                            symbolLimit=100,
-                            padding=10
-                        ))
-                    )
-
-                    lines = base.mark_line(interpolate='monotone').encode(
-                        opacity=alt.condition(selection, alt.value(1), alt.value(0.15)),
-                        strokeWidth=alt.condition(selection, alt.value(2.5), alt.value(1))
-                    ).add_params(selection)
-
-                    selectors = base.mark_point().encode(
-                        opacity=alt.value(0),
-                        tooltip=[
-                            alt.Tooltip('date:T', title='Date', format='%Y-%m-%d'),
-                            alt.Tooltip('Market:N', title='Market'),
-                            alt.Tooltip('indexed_demand:Q', title='Index Value', format='.3f')
-                        ]
-                    ).add_params(hover)
-
-                    points = base.mark_point().encode(
-                        opacity=alt.condition(hover, alt.value(1), alt.value(0))
-                    )
-
-                    rules = base.mark_rule(color='white', strokeWidth=0.5).encode(
-                        opacity=alt.condition(hover, alt.value(0.3), alt.value(0))
-                    ).transform_filter(hover)
-
-                    # Updated to use global height constant
-                    final_chart = alt.layer(
-                        lines, selectors, points, rules
-                    ).properties(height=DEMAND_TREND_CHART_HEIGHT).interactive()
-                    
-                    st.altair_chart(final_chart, use_container_width=True)
-                else:
-                    st.info(f"No markets found matching filter: {filter_mode}")
-            else:
-                st.info("No historical data available for selected markets.")
 
         st.divider()
         st.subheader("🔍 Results")
