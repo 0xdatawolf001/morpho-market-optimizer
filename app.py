@@ -291,7 +291,7 @@ def get_market_dictionary():
             "skip": skip,
             "where": {
                 "chainId_in": TARGET_CHAINS,
-                "whitelisted": True
+                "whitelisted": False
             }
         }
         
@@ -315,13 +315,12 @@ def get_market_dictionary():
         state = m.get('state') or {}
         collateral = m.get('collateralAsset') or {}
         
-        price_usd = loan.get('priceUsd')
-        if price_usd is None or price_usd <= 0:
-            symbol = str(loan.get('symbol', '')).upper()
-            if any(s in symbol for s in ['USD', 'DAI', 'PYUSD', 'USDS', 'USDT']):
-                price_usd = 1.0
-            else:
-                price_usd = 0.0
+        def safe_float(value, default=0.0):
+            if value is None: return default
+            try: return float(value)
+            except (ValueError, TypeError): return default
+
+        price_usd = safe_float(loan.get('priceUsd'), 0.0)
 
         loan_address = loan.get('address')
         decimals = loan.get('decimals')
@@ -363,10 +362,9 @@ def get_market_dictionary():
               .sort_values('Total Supply (USD)', ascending=False)
            )
 
-def fetch_live_market_details(selected_df):
+def fetch_live_market_details(selected_df, my_bar=None):
     """
-    Optimized: Fetches all market details in a single bulk request
-    instead of a sequential loop of network calls.
+    Optimized: Fetches all market details in a single bulk request.
     """
     if selected_df.empty:
         return []
@@ -390,30 +388,30 @@ def fetch_live_market_details(selected_df):
     }
     """
     
-    variables = {
-        "where": {
-            "uniqueKey_in": market_ids
-        }
-    }
-    
+    variables = {"where": {"uniqueKey_in": market_ids}}
+    details = []
+
     try:
         resp = requests.post(MORPHO_API_URL, json={'query': query, 'variables': variables}, timeout=30)
-        data = resp.json().get('data', {}).get('markets', {}).get('items', [])
+        resp.raise_for_status() # Check for HTTP errors
+        
+        raw_data = resp.json()
+        items = raw_data.get('data', {}).get('markets', {}).get('items', [])
         
         # Create a lookup map for the bulk results
-        lookup = {item['uniqueKey']: item['state'] for item in data}
+        lookup = {item['uniqueKey']: item['state'] for item in items if item.get('state')}
         
-        details = []
         for _, row in selected_df.iterrows():
             m_id = row['Market ID']
             state = lookup.get(m_id)
             
             if state:
+                # Morpho values are strings (BigInts), convert safely
                 sup = float(state['supplyAssets'])
                 bor = float(state['borrowAssets'])
                 util = bor / sup if sup > 0 else 0
                 
-                # Accrue interest logic matches documentation/original code
+                # IRM logic
                 curr_rate_sec = apy_to_rate_per_second(float(state['borrowApy']))
                 mult = compute_curve_multiplier(util)
                 
@@ -425,12 +423,18 @@ def fetch_live_market_details(selected_df):
                     'rate_at_target': (curr_rate_sec / mult if mult > 0 else 0),
                     'current_supply_apy': float(state['supplyApy'])
                 })
-        return details
-        
+                
     except Exception as e:
+        # If using Streamlit:
+        import streamlit as st
         st.error(f"Error fetching bulk market details: {e}")
         return []
-    my_bar.empty()
+    
+    finally:
+        # This ensures the progress bar is cleared whether the try succeeds or fails
+        if my_bar is not None:
+            my_bar.empty()
+
     return details
 
 def fetch_user_positions(user_address):
