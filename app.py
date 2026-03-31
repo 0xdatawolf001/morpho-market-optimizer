@@ -274,8 +274,8 @@ def get_market_dictionary():
     }
     """
     
-    # 2. Define your pre-selected Chain IDs
-    # Ethereum: 1, Base: 8453, Arbitrum: 42161, HyperEVM: 999
+    # 2. Define your pre-selected Chain IDs (Updated to match full documentation list)
+    # TARGET_CHAINS = [1, 10, 130, 137, 143, 8453, 42161, 999, 747474, 988, 98866]
     TARGET_CHAINS = [1, 8453, 42161, 999]
     
     all_items = []
@@ -285,12 +285,13 @@ def get_market_dictionary():
     while True:
         load_status.info(f"⏳ Retrieving Morpho Markets... {len(all_items)} found. Please wait...")
         
-        # 3. Pass the chainId_in filter into the variables
+        # 3. Pass the chainId_in and whitelisted: true filter for speed
         variables = {
             "first": BATCH_SIZE, 
             "skip": skip,
             "where": {
-                "chainId_in": TARGET_CHAINS
+                "chainId_in": TARGET_CHAINS,
+                "whitelisted": True
             }
         }
         
@@ -363,31 +364,72 @@ def get_market_dictionary():
            )
 
 def fetch_live_market_details(selected_df):
-    details = []
-    my_bar = st.progress(0, text="Fetching real-time yields...")
-    for i, (_, row) in enumerate(selected_df.iterrows()):
-        query = """
-        query GetMarketData($uniqueKey: String!, $chainId: Int!) {
-            marketByUniqueKey(uniqueKey: $uniqueKey, chainId: $chainId) {
-                state { supplyAssets borrowAssets fee borrowApy supplyApy }
+    """
+    Optimized: Fetches all market details in a single bulk request
+    instead of a sequential loop of network calls.
+    """
+    if selected_df.empty:
+        return []
+    
+    market_ids = selected_df['Market ID'].tolist()
+    
+    query = """
+    query GetBulkMarketData($where: MarketFilters) {
+        markets(where: $where) {
+            items {
+                uniqueKey
+                state { 
+                    supplyAssets 
+                    borrowAssets 
+                    fee 
+                    borrowApy 
+                    supplyApy 
+                }
             }
         }
-        """
-        r = requests.post(MORPHO_API_URL, json={'query': query, 'variables': {"uniqueKey": row['Market ID'], "chainId": int(row['ChainID'])}}).json().get('data', {}).get('marketByUniqueKey')
-        if r:
-            state = r['state']
-            sup, bor = float(state['supplyAssets']), float(state['borrowAssets'])
-            util = bor / sup if sup > 0 else 0
-            curr_rate_sec = apy_to_rate_per_second(float(state['borrowApy']))
-            mult = compute_curve_multiplier(util)
-            details.append({
-                **row.to_dict(),
-                'raw_supply': sup, 'raw_borrow': bor,
-                'fee': float(state['fee']) / WAD,
-                'rate_at_target': (curr_rate_sec / mult if mult > 0 else 0),
-                'current_supply_apy': float(state['supplyApy'])
-            })
-        my_bar.progress((i + 1) / len(selected_df))
+    }
+    """
+    
+    variables = {
+        "where": {
+            "uniqueKey_in": market_ids
+        }
+    }
+    
+    try:
+        resp = requests.post(MORPHO_API_URL, json={'query': query, 'variables': variables}, timeout=30)
+        data = resp.json().get('data', {}).get('markets', {}).get('items', [])
+        
+        # Create a lookup map for the bulk results
+        lookup = {item['uniqueKey']: item['state'] for item in data}
+        
+        details = []
+        for _, row in selected_df.iterrows():
+            m_id = row['Market ID']
+            state = lookup.get(m_id)
+            
+            if state:
+                sup = float(state['supplyAssets'])
+                bor = float(state['borrowAssets'])
+                util = bor / sup if sup > 0 else 0
+                
+                # Accrue interest logic matches documentation/original code
+                curr_rate_sec = apy_to_rate_per_second(float(state['borrowApy']))
+                mult = compute_curve_multiplier(util)
+                
+                details.append({
+                    **row.to_dict(),
+                    'raw_supply': sup, 
+                    'raw_borrow': bor,
+                    'fee': float(state['fee']) / WAD,
+                    'rate_at_target': (curr_rate_sec / mult if mult > 0 else 0),
+                    'current_supply_apy': float(state['supplyApy'])
+                })
+        return details
+        
+    except Exception as e:
+        st.error(f"Error fetching bulk market details: {e}")
+        return []
     my_bar.empty()
     return details
 
