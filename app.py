@@ -290,8 +290,7 @@ def get_market_dictionary():
             "first": BATCH_SIZE, 
             "skip": skip,
             "where": {
-                "chainId_in": TARGET_CHAINS,
-                "whitelisted": False
+                "chainId_in": TARGET_CHAINS
             }
         }
         
