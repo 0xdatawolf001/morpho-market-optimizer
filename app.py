@@ -1389,7 +1389,7 @@ if not df_selected.empty:
                 tooltip=['Type', 'Blended APY', 'Diversity Score']
             )
             
-            if not df_scatter.empty and len(df_scatter['Type'].unique()) > 0:
+            if not df_scatter.empty:
                 base = alt.Chart(df_scatter).mark_circle(opacity=0.3, color='#80DEEA').encode(
                     x=alt.X('Diversity Score', title='Diversity (1 - HHI)'),
                     y=alt.Y('Blended APY', title='APY', axis=alt.Axis(format='%')),
@@ -1403,7 +1403,7 @@ if not df_selected.empty:
                     tooltip=['Type', 'Blended APY', 'Diversity Score']
                 )
                 
-                st.altair_chart(base + points, width='stretch')
+                st.altair_chart(base + points, use_container_width=True)
             else:
                 st.info("Not enough data to generate optimization charts. Please add capital or select more markets.")
 
@@ -1470,13 +1470,22 @@ if not df_selected.empty:
         
         if bar_data:
             df_bar = pd.DataFrame(bar_data)
+            
+            # Focused Portfolio View: Group by Strategy, list Assets within
             bar_chart = alt.Chart(df_bar).mark_bar().encode(
-                x=alt.X('Market:N', title="Market Pair (ID)", axis=alt.Axis(labelAngle=-45)),
-                y=alt.Y('Alloc ($):Q', title="Allocation (USD)", scale=alt.Scale(zero=True)),
-                xOffset='Strategy:N',
-                color=alt.Color('Strategy:N', scale=alt.Scale(domain=STRAT_DOMAIN, range=STRAT_RANGE)),
-                tooltip=['Market', 'Strategy', alt.Tooltip('Alloc ($)', format='$,.2f')]
-            ).properties(height=400).configure_view(stroke=None) # Increased height
+                y=alt.Y('Market:N', title=None, sort='-x'),
+                x=alt.X('Alloc ($):Q', title="Allocation (USD)", axis=alt.Axis(format='$,.0f')),
+                color=alt.Color('Market:N', legend=None), # Color by market for visual distinction
+                row=alt.Row('Strategy:N', title="Portfolio Strategy", header=alt.Header(labelAngle=0, labelAlign='left', labelFontSize=14)),
+                tooltip=['Strategy', 'Market', alt.Tooltip('Alloc ($)', format='$,.2f')]
+            ).properties(
+                height=alt.Step(25), # Dynamically adjusts height based on number of markets
+            ).resolve_scale(
+                y='independent' # Only show markets that have an allocation in that specific portfolio
+            ).configure_view(
+                stroke=None
+            )
+            
             st.altair_chart(bar_chart, use_container_width=True)
         else:
             st.info("No significant allocations.")
@@ -1739,79 +1748,163 @@ if not df_selected.empty:
         st.divider()
 
 # ==========================================
-# 5. EXECUTION LOGIC & TABLES
-# ==========================================
+        # 5. EXECUTION LOGIC & TABLES
+        # ==========================================
 
+        # --- PRE-CALCULATE ACTUAL TRANSFERS (Grouped Match) ---
+        # Moving this up so the summary table can be derived from the actual plan
+        all_sources = []
+        wallet_source = None
+        
+        withdraw_df = df_res[df_res["Liquid Move ($)"] < -0.01]
+        for _, row in withdraw_df.iterrows():
+            try:
+                m_row = st.session_state.market_dict[st.session_state.market_dict['Market ID'] == row['Market ID Full']]
+                if not m_row.empty:
+                    dec_val = int(m_row.iloc[0]['Decimals'])
+                    tok_addr = row.get('Loan Address') or m_row.iloc[0]['Loan Address']
+                else:
+                    dec_val = 18 
+                    tok_addr = row.get('Loan Address')
+            except Exception:
+                dec_val = 18
+                tok_addr = row.get('Loan Address')
+
+            all_sources.append({
+                "id": row['Market ID Full'],
+                "name": row['Market'],
+                "chain": row['Chain'],
+                "token": row['Token'],
+                "available": abs(row['Liquid Move ($)']),
+                "running_balance": row['Current ($)'],
+                "type": "Market",
+                "chain_id": row.get('ChainID'),
+                "token_address": tok_addr,
+                "decimals": dec_val,
+                "price": row.get('Price USD', 1.0)
+            })
+            
+        if new_cash > 0.01:
+            wallet_source = { 
+                "id": "Wallet", "name": "New Capital", "chain": "Wallet", "token": "CASH",
+                "available": new_cash, "running_balance": new_cash, "type": "Wallet",
+                "chain_id": None, "token_address": None, "decimals": 18, "price": 1.0
+            }
+            
+        all_destinations = []
+        deposit_df = df_res[df_res["Net Move ($)"] > 0.01]
+        for _, row in deposit_df.iterrows():
+            try:
+                m_row = st.session_state.market_dict[st.session_state.market_dict['Market ID'] == row['Market ID Full']]
+                tok_addr = row.get('Loan Address') or (m_row.iloc[0]['Loan Address'] if not m_row.empty else None)
+            except:
+                tok_addr = None
+
+            all_destinations.append({
+                "id": row['Market ID Full'],
+                "name": row['Market'],
+                "chain": row['Chain'],
+                "token": row['Token'],
+                "needed": row['Net Move ($)'],
+                "running_balance": row['Current ($)'],
+                "chain_id": row.get('ChainID'),
+                "token_address": tok_addr,
+                "apy": row.get('Simulated APY', 0.0)
+            })
+
+        def get_group_key(item):
+            if "1)" in rebalance_scope: return "GLOBAL"
+            if "2)" in rebalance_scope: return (item['chain'], item['token'])
+            if "3)" in rebalance_scope: return item['chain']
+            if "4)" in rebalance_scope: return item['token']
+            return "GLOBAL"
+
+        groups = {}
+        for src in all_sources:
+            k = get_group_key(src); groups.setdefault(k, {'src': [], 'dst': []})['src'].append(src)
+        for dst in all_destinations:
+            k = get_group_key(dst); groups.setdefault(k, {'src': [], 'dst': []})['dst'].append(dst)
+
+        transfer_steps = []
+        ordering_counter = 1
+
+        for g_key, bucket in groups.items():
+            g_srcs, g_dsts = bucket['src'], bucket['dst']
+            s_idx, d_idx = 0, 0
+            while d_idx < len(g_dsts):
+                dst = g_dsts[d_idx]
+                amount_needed = dst['needed']
+                amount_from_src, src, used_wallet = 0.0, None, False
+                
+                if s_idx < len(g_srcs):
+                    src = g_srcs[s_idx]
+                    amount_from_src = min(src['available'], amount_needed)
+                
+                if amount_from_src < 0.01 and wallet_source and wallet_source['available'] > 0.01:
+                    src, amount_from_src, used_wallet = wallet_source, min(wallet_source['available'], amount_needed), True
+                
+                if amount_from_src > 0.01:
+                    dst['running_balance'] += amount_from_src
+                    src['running_balance'] -= amount_from_src
+                    src['available'] -= amount_from_src
+                    dst['needed'] -= amount_from_src
+                    
+                    if src['type'] == "Wallet": op_type, op_code = "New Deposit", 0
+                    elif src['chain'] != dst['chain']: op_type, op_code = "3. Bridge", 3
+                    elif src['token'] != dst['token']: op_type, op_code = "2. Swap", 2
+                    else: op_type, op_code = "1. Rebalance", 1
+                    
+                    transfer_steps.append({
+                        "Ordering": ordering_counter, "Operation Type": op_type, "OpCode": op_code,
+                        "From": src['name'], "From ID": src.get('id'), "From (Chain)": src['chain'], "From (Token)": src['token'],
+                        "To": dst['name'], "To ID": dst.get('id'), "To (Chain)": dst['chain'], "To (Token)": dst['token'],
+                        "Amount to move ($)": amount_from_src, "Remaining Funds In Source ($)": src['running_balance'],
+                        "src_chain_id": src.get('chain_id'), "dst_chain_id": dst.get('chain_id'),
+                        "src_token": src.get('token_address'), "dst_token": dst.get('token_address'),
+                        "decimals": int(src.get('decimals') or 18), "price": src.get('price', 1.0), "dst_apy": dst.get('apy', 0.0)
+                    })
+                    ordering_counter += 1
+                    if not used_wallet and src['available'] < 0.01: s_idx += 1
+                    if dst['needed'] < 0.01: d_idx += 1
+                else: d_idx += 1
+
+        for g_key, bucket in groups.items():
+            for src in bucket['src']:
+                if src['available'] > 0.01:
+                    src['running_balance'] -= src['available']
+                    transfer_steps.append({
+                        "Ordering": ordering_counter, "Operation Type": "Cash Out", "OpCode": 0,
+                        "From": src['name'], "From ID": src.get('id'), "From (Chain)": src['chain'], "From (Token)": src['token'],
+                        "To": "Wallet", "To ID": "N/A", "To (Chain)": "Wallet", "To (Token)": "CASH",
+                        "Amount to move ($)": src['available'], "Remaining Funds In Source ($)": src['running_balance']
+                    })
+                    ordering_counter += 1
+
+        # --- GENERATE SUMMARY TABLE FROM ACTUAL STEPS ---
         st.markdown("#### 📤 Withdrawal Operations Split")
         st.caption("How funds move from source markets to destinations based on your constraints.")
         
-        def get_silo_key(row):
-            if "1)" in rebalance_scope: return "GLOBAL"
-            if "2)" in rebalance_scope: return (row['Chain'], row['Token'])
-            if "3)" in rebalance_scope: return row['Chain']
-            if "4)" in rebalance_scope: return row['Token']
-            return "GLOBAL"
-
-        silo_global_demand = {} 
-        silo_token_demand = {}
-        silo_chain_demand = {}
-        
-        # We use Net Move here because it represents what the optimizer INTENDED to move
-        deposits = df_res[df_res['Net Move ($)'] > 0.01]
-        for _, row in deposits.iterrows():
-            c, t = row['Chain'], row['Token']
-            amt = row['Net Move ($)']
-            s_key = get_silo_key(row)
+        summary_map = {}
+        for step in transfer_steps:
+            s_id = step.get('From ID')
+            if not s_id or s_id == "Wallet": continue
             
-            silo_token_demand[(c, t)] = silo_token_demand.get((c, t), 0.0) + amt
-            silo_chain_demand[c] = silo_chain_demand.get(c, 0.0) + amt
-            silo_global_demand[s_key] = silo_global_demand.get(s_key, 0.0) + amt
+            if s_id not in summary_map:
+                summary_map[s_id] = {
+                    "Source Market": step['From'], "Market ID": s_id[:7], "Chain": step['From (Chain)'], "Asset": step['From (Token)'],
+                    "Total Withdrawal": 0.0, "1. Internal Rebalance": 0.0, "2. Internal Swap": 0.0, "3. Bridge Out": 0.0, "4. Cash Out": 0.0
+                }
             
-        withdraw_logic = []
-        # Filter withdrawals using the restored 'Liquid Move ($)' key
-        withdrawals = df_res[df_res['Liquid Move ($)'] < -0.01].copy()
-        
-        for _, row in withdrawals.iterrows():
-            src_chain, src_token = row['Chain'], row['Token']
-            src_name, src_id = row['Market'], row['Destination ID']
-            total_moved = abs(row['Liquid Move ($)'])
-            remaining = total_moved
-            s_key = get_silo_key(row)
-            
-            matched_reb = min(remaining, silo_token_demand.get((src_chain, src_token), 0.0))
-            if matched_reb > 0.01:
-                silo_token_demand[(src_chain, src_token)] -= matched_reb
-                silo_chain_demand[src_chain] -= matched_reb
-                silo_global_demand[s_key] -= matched_reb
-                remaining -= matched_reb
-            else: matched_reb = 0.0
+            amt = step['Amount to move ($)']
+            summary_map[s_id]["Total Withdrawal"] += amt
+            if step['OpCode'] == 1: summary_map[s_id]["1. Internal Rebalance"] += amt
+            elif step['OpCode'] == 2: summary_map[s_id]["2. Internal Swap"] += amt
+            elif step['OpCode'] == 3: summary_map[s_id]["3. Bridge Out"] += amt
+            elif step['Operation Type'] == "Cash Out": summary_map[s_id]["4. Cash Out"] += amt
 
-            matched_swap = 0.0
-            if "1)" in rebalance_scope or "3)" in rebalance_scope:
-                matched_swap = min(remaining, silo_chain_demand.get(src_chain, 0.0))
-                if matched_swap > 0.01:
-                    silo_chain_demand[src_chain] -= matched_swap
-                    silo_global_demand[s_key] -= matched_swap
-                    remaining -= matched_swap
-
-            matched_bridge = 0.0
-            if "1)" in rebalance_scope or "4)" in rebalance_scope:
-                matched_bridge = min(remaining, silo_global_demand.get(s_key, 0.0))
-                if matched_bridge > 0.01:
-                    silo_global_demand[s_key] -= matched_bridge
-                    remaining -= matched_bridge
-
-            matched_cash = remaining
-
-            withdraw_logic.append({
-                "Source Market": src_name, "Market ID": src_id, "Chain": src_chain, "Asset": src_token,
-                "Total Withdrawal": total_moved, "1. Internal Rebalance": matched_reb,
-                "2. Internal Swap": matched_swap, "3. Bridge Out": matched_bridge, "4. Cash Out": matched_cash
-            })
-            
-        if withdraw_logic:
+        if summary_map:
             st.dataframe(
-                pd.DataFrame(withdraw_logic).style.format({
+                pd.DataFrame(list(summary_map.values())).style.format({
                     "Total Withdrawal": "${:,.2f}", "1. Internal Rebalance": "${:,.2f}",
                     "2. Internal Swap": "${:,.2f}", "3. Bridge Out": "${:,.2f}", "4. Cash Out": "${:,.2f}"
                 }).applymap(lambda x: 'background-color: #1b5e20; color: white' if x > 0.01 else '', subset=["1. Internal Rebalance"])
