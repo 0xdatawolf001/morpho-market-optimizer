@@ -1473,10 +1473,10 @@ if not df_selected.empty:
             
             # Focused Portfolio View: Group by Strategy, list Assets within
             bar_chart = alt.Chart(df_bar).mark_bar().encode(
-                y=alt.Y('Market:N', title=None, sort='-x'),
+                y=alt.Y('Market:N', title=None, sort='ascending'),
                 x=alt.X('Alloc ($):Q', title="Allocation (USD)", axis=alt.Axis(format='$,.0f')),
                 color=alt.Color('Market:N', legend=None), # Color by market for visual distinction
-                row=alt.Row('Strategy:N', title="Portfolio Strategy", header=alt.Header(labelAngle=0, labelAlign='left', labelFontSize=14)),
+                row=alt.Row('Strategy:N', title="Portfolio Strategy", sort=['Best Yield', 'Whale Shield', 'Frontier', 'Liquid-Yield'], header=alt.Header(labelAngle=0, labelAlign='left', labelFontSize=14)),
                 tooltip=['Strategy', 'Market', alt.Tooltip('Alloc ($)', format='$,.2f')]
             ).properties(
                 height=alt.Step(25), # Dynamically adjusts height based on number of markets
