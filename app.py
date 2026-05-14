@@ -1480,6 +1480,7 @@ if not df_selected.empty:
                 tooltip=['Strategy', 'Market', alt.Tooltip('Alloc ($)', format='$,.2f')]
             ).properties(
                 height=alt.Step(25), # Dynamically adjusts height based on number of markets
+                width='container'    # FIX: Forces the chart to fill the width, preventing vertical compression in Prod
             ).resolve_scale(
                 y='independent' # Only show markets that have an allocation in that specific portfolio
             ).configure_view(
