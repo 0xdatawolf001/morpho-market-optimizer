@@ -167,14 +167,14 @@ def get_market_dictionary():
     query GetAllMarkets($first: Int, $skip: Int, $where: MarketFilters) {
       markets(first: $first, skip: $skip, where: $where) {
         items {
-          uniqueKey
-          whitelisted
-          loanAsset { 
-            address 
-            symbol 
-            decimals 
-            priceUsd 
-            chain { id } 
+          marketId
+          listed
+          loanAsset {
+            address
+            symbol
+            decimals
+            price { usd }
+            chain { id }
           }
           collateralAsset { symbol }
           state {
@@ -230,7 +230,8 @@ def get_market_dictionary():
         state = m.get('state') or {}
         collateral = m.get('collateralAsset') or {}
         
-        price_usd = loan.get('priceUsd')
+        price_obj = loan.get('price') or {}
+        price_usd = price_obj.get('usd')
         if price_usd is None or price_usd <= 0:
             symbol = str(loan.get('symbol', '')).upper()
             if any(s in symbol for s in ['USD', 'DAI', 'PYUSD', 'USDS', 'USDT']):
@@ -252,10 +253,10 @@ def get_market_dictionary():
         chain_id = loan.get('chain', {}).get('id')
         
         processed.append({
-            "Market ID": m['uniqueKey'],
+            "Market ID": m['marketId'],
             "Chain": CHAIN_ID_TO_NAME.get(chain_id, "Other"),
             "Loan Token": loan.get('symbol'),
-            "Loan Address": loan_address, 
+            "Loan Address": loan_address,
             "Collateral": collateral_symbol,
             "Decimals": int(decimals),
             "Price USD": float(price_usd),
@@ -265,7 +266,7 @@ def get_market_dictionary():
             "Total Supply (USD)": supply_usd,
             "Total Borrow (USD)": borrow_usd,
             "Available Liquidity (USD)": supply_usd - borrow_usd,
-            "Whitelisted": m.get('whitelisted', False)
+            "Whitelisted": m.get('listed', False)
         })
     
     return (pd.DataFrame(processed) 
