@@ -279,13 +279,13 @@ def fetch_live_market_details(selected_df):
     my_bar = st.progress(0, text="Fetching real-time yields...")
     for i, (_, row) in enumerate(selected_df.iterrows()):
         query = """
-        query GetMarketData($uniqueKey: String!, $chainId: Int!) {
-            marketByUniqueKey(uniqueKey: $uniqueKey, chainId: $chainId) {
+        query GetMarketData($marketId: String!, $chainId: Int!) {
+            marketById(marketId: $marketId, chainId: $chainId) {
                 state { supplyAssets borrowAssets fee borrowApy supplyApy }
             }
         }
         """
-        r = requests.post(MORPHO_API_URL, json={'query': query, 'variables': {"uniqueKey": row['Market ID'], "chainId": int(row['ChainID'])}}).json().get('data', {}).get('marketByUniqueKey')
+        r = requests.post(MORPHO_API_URL, json={'query': query, 'variables': {"marketId": row['Market ID'], "chainId": int(row['ChainID'])}}).json().get('data', {}).get('marketById')
         if r:
             state = r['state']
             sup, bor = float(state['supplyAssets']), float(state['borrowAssets'])
@@ -305,42 +305,59 @@ def fetch_live_market_details(selected_df):
 
 def fetch_user_positions(user_address):
     """
-    FIXED: Queries 'supplyAssetsUsd' inside the 'state' object 
-    to match the current Morpho API schema.
+    Fetch active Morpho positions for a wallet address.
+    Uses marketPositions with chainId_in filter (required by API).
+    Returns dict of {marketId: supplyAssetsUsd} for positions > $0.01.
     """
     user_address = user_address.lower()
+
+    # Supported chain IDs for the Morpho API (marketPositions endpoint)
+    SUPPORTED_CHAIN_IDS = [1, 8453, 42161, 999, 10, 130, 137, 480, 143]
+
     query = """
     query GetUserPositions($user: [String!]) {
-      marketPositions(first: 100, where: { userAddress_in: $user }) {
+      marketPositions(
+        first: 1000,
+        where: {
+          userAddress_in: $user,
+          chainId_in: [1, 8453, 42161, 999, 10, 130, 137, 480, 143]
+        }
+      ) {
         items {
-          market { uniqueKey }
-          state { 
-            supplyAssetsUsd 
+          market { marketId }
+          state {
+            supplyAssetsUsd
+            borrowAssetsUsd
+            collateral
           }
         }
       }
     }
     """
-    
+
     positions = {}
     try:
         variables = {"user": [user_address]}
         resp = requests.post(MORPHO_API_URL, json={'query': query, 'variables': variables})
         data = resp.json()
-        
-        if 'data' in data and 'marketPositions' in data['data']:
-            items = data['data']['marketPositions']['items']
-            for item in items:
-                m_id = item['market']['uniqueKey']
-                # ACCESS DATA VIA ['state']
-                state = item.get('state')
-                if state:
-                    bal = float(state.get('supplyAssetsUsd', 0))
-                    if bal > 0.01: # Filter dust
-                        positions[m_id] = bal
+
+        if 'errors' in data:
+            return positions
+
+        items = (data.get('data') or {}).get('marketPositions', {}).get('items', [])
+        for item in items:
+            market = item.get('market') or {}
+            m_id = market.get('marketId')
+            if not m_id:
+                continue
+            state = item.get('state') or {}
+            # Use supplyAssetsUsd as the balance metric
+            bal = float(state.get('supplyAssetsUsd') or 0)
+            if bal > 0.01:
+                positions[m_id] = bal
     except Exception as e:
         st.error(f"Error parsing user positions: {e}")
-        
+
     return positions
 
 # ==========================================
