@@ -275,31 +275,63 @@ def get_market_dictionary():
            )
 
 def fetch_live_market_details(selected_df):
+    """
+    Fetch real-time market data for selected markets.
+    Uses markets(where: {uniqueKey_in: [...]}) since marketById is not available
+    in the current API schema.
+    """
     details = []
     my_bar = st.progress(0, text="Fetching real-time yields...")
-    for i, (_, row) in enumerate(selected_df.iterrows()):
-        query = """
-        query GetMarketData($marketId: String!, $chainId: Int!) {
-            marketById(marketId: $marketId, chainId: $chainId) {
+
+    # Batch all market IDs into a single query using uniqueKey_in
+    market_ids = selected_df['Market ID'].tolist()
+
+    query = """
+    query GetMarketData($where: MarketFilters, $first: Int!) {
+        markets(first: $first, where: $where) {
+            items {
+                marketId
                 state { supplyAssets borrowAssets fee borrowApy supplyApy }
             }
         }
-        """
-        r = requests.post(MORPHO_API_URL, json={'query': query, 'variables': {"marketId": row['Market ID'], "chainId": int(row['ChainID'])}}).json().get('data', {}).get('marketById')
-        if r:
-            state = r['state']
-            sup, bor = float(state['supplyAssets']), float(state['borrowAssets'])
-            util = bor / sup if sup > 0 else 0
-            curr_rate_sec = apy_to_rate_per_second(float(state['borrowApy']))
-            mult = compute_curve_multiplier(util)
-            details.append({
-                **row.to_dict(),
-                'raw_supply': sup, 'raw_borrow': bor,
-                'fee': float(state['fee']) / WAD,
-                'rate_at_target': (curr_rate_sec / mult if mult > 0 else 0),
-                'current_supply_apy': float(state['supplyApy'])
-            })
-        my_bar.progress((i + 1) / len(selected_df))
+    }
+    """
+
+    try:
+        variables = {
+            "where": {"uniqueKey_in": market_ids},
+            "first": len(market_ids) + 10
+        }
+        resp = requests.post(MORPHO_API_URL, json={'query': query, 'variables': variables})
+        json_data = resp.json().get('data', {})
+
+        if json_data:
+            # Build a lookup from marketId -> state data
+            state_lookup = {}
+            for item in json_data.get('markets', {}).get('items', []):
+                mid = item.get('marketId')
+                if mid:
+                    state_lookup[mid] = item.get('state', {})
+
+            for i, (_, row) in enumerate(selected_df.iterrows()):
+                m_id = row['Market ID']
+                state = state_lookup.get(m_id)
+                if state:
+                    sup, bor = float(state['supplyAssets']), float(state['borrowAssets'])
+                    util = bor / sup if sup > 0 else 0
+                    curr_rate_sec = apy_to_rate_per_second(float(state['borrowApy']))
+                    mult = compute_curve_multiplier(util)
+                    details.append({
+                        **row.to_dict(),
+                        'raw_supply': sup, 'raw_borrow': bor,
+                        'fee': float(state['fee']) / WAD,
+                        'rate_at_target': (curr_rate_sec / mult if mult > 0 else 0),
+                        'current_supply_apy': float(state['supplyApy'])
+                    })
+                my_bar.progress((i + 1) / len(selected_df))
+    except Exception as e:
+        st.error(f"Error fetching market details: {e}")
+
     my_bar.empty()
     return details
 
@@ -307,7 +339,12 @@ def fetch_user_positions(user_address):
     """
     Fetch active Morpho positions for a wallet address.
     Uses marketPositions with chainId_in filter (required by API).
-    Returns dict of {marketId: supplyAssetsUsd} for positions > $0.01.
+
+    NOTE: supplyAssetsUsd is always null in the Morpho API, so we use
+    supplyAssets (raw token amount) and convert to USD using token price.
+    Falls back to $1 for stablecoins when price is unavailable.
+
+    Returns dict of {marketId: supply_usd} for positions > $0.01.
     """
     user_address = user_address.lower()
 
@@ -324,11 +361,12 @@ def fetch_user_positions(user_address):
         }
       ) {
         items {
-          market { marketId }
+          market {
+            marketId
+            loanAsset { symbol decimals }
+          }
           state {
-            supplyAssetsUsd
-            borrowAssetsUsd
-            collateral
+            supplyAssets
           }
         }
       }
@@ -345,14 +383,41 @@ def fetch_user_positions(user_address):
             return positions
 
         items = (data.get('data') or {}).get('marketPositions', {}).get('items', [])
+
+        # Build a lookup of token prices from the market dictionary
+        price_lookup = {}
+        if 'market_dict' in st.session_state:
+            for _, row in st.session_state.market_dict.iterrows():
+                sym = str(row.get('Loan Token', '')).upper()
+                price = float(row.get('Price USD', 0) or 0)
+                if price > 0:
+                    price_lookup[sym] = price
+
         for item in items:
             market = item.get('market') or {}
             m_id = market.get('marketId')
             if not m_id:
                 continue
             state = item.get('state') or {}
-            # Use supplyAssetsUsd as the balance metric
-            bal = float(state.get('supplyAssetsUsd') or 0)
+            loan_asset = market.get('loanAsset') or {}
+            symbol = str(loan_asset.get('symbol', '')).upper()
+            decimals = int(loan_asset.get('decimals', 18) or 18)
+
+            # Use supplyAssets (raw) since supplyAssetsUsd is always null
+            raw_supply = float(state.get('supplyAssets') or 0)
+            if raw_supply <= 0:
+                continue
+
+            # Convert raw token amount to USD
+            token_amount = raw_supply / (10 ** decimals)
+            price_usd = price_lookup.get(symbol)
+            if price_usd is not None and price_usd > 0:
+                bal = token_amount * price_usd
+            elif any(s in symbol for s in ['USD', 'DAI', 'PYUSD', 'USDS', 'USDT']):
+                bal = token_amount * 1.0  # fallback for stablecoins
+            else:
+                continue  # unknown price, skip
+
             if bal > 0.01:
                 positions[m_id] = bal
     except Exception as e:
