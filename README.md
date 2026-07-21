@@ -1,5 +1,24 @@
 # Morpho Market Optimizer
 
+An informational Streamlit app for **discovering Morpho markets**, inspecting market details, and running **what-if portfolio optimization** across four strategies. Results are simulations only — no rebalancing or transaction execution.
+
+## Quick start
+
+```bash
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+## App flow (3 pages)
+
+1. **Markets** — Monarch-inspired discovery: live search/filters, sort, pagination, row selection, optimizer basket
+2. **Market** — Deep-linkable detail view (`?chain_id=&market_id=`): overview, rolling APYs, 30d charts, risk/warnings
+3. **Optimize** — Wallet import, portfolio editor, parameters, four-strategy simulation, charts and allocation tables
+
+Data source: **Morpho GraphQL only** (`api.morpho.org`).
+
+---
+
 ## 🎯 The Problem: Yield Optimization is Tricky
 
 DeFi yield optimization across Morpho lending markets presents a complex challenge:
@@ -67,11 +86,11 @@ Click "Run Optimization" to analyze **four intelligent strategies**:
 | **🌸 Frontier** | Yield-risk Pareto efficiency | Balanced investors seeking optimal tradeoff |
 | **🟢 Liquid-Yield** | Deep liquidity prioritization | Large investors needing exit flexibility |
 
-### 5️⃣ **Review & Execute**
+### 5️⃣ **Review Results (Simulation)**
 - **Compare strategies** with side-by-side metrics and visualizations
 - **See projected earnings** (annual, monthly, weekly, daily)
-- **Get step-by-step execution plan** with exact transfer amounts
-- **Identify liquidity issues** before they become problems
+- **Review suggested allocations** with liquidity-limited flags
+- **Simulation disclaimer** — not a transaction or rebalancing plan
 
 ## 🎯 Key Features That Set Us Apart
 
@@ -132,7 +151,7 @@ Our optimization engine consistently delivers:
 - **20-50% higher blended APY** compared to manual allocation
 - **80% reduction in stuck capital** through intelligent liquidity analysis
 - **Optimal diversification** maintaining yield while reducing risk
-- **Clear execution plans** eliminating guesswork from rebalancing
+- **Clear allocation breakdown** with informational action labels (Allocate / Reduce / Hold)
 
 ## 🚀 Getting Started
 
@@ -146,12 +165,17 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
+### Three-page workflow
+1. **Markets** — live filters, search, sort, pagination; select rows to view detail or add to the optimizer basket
+2. **Market Detail** — deep-link via `?chain_id=&market_id=`; Overview, Rates, and Risk tabs with historical charts
+3. **Optimize** — basket-driven portfolio input, wallet import, four strategies, charts and allocation tables (simulation only)
+
 ### Quick Start Guide
-1. **Connect your wallet** to import existing positions
-2. **Add 3-5 high-potential markets** from our discovery tool
-3. **Set your risk parameters** (start with defaults if unsure)
-4. **Run optimization** and compare all four strategies
-5. **Review the execution plan** and implement transfers
+1. **Browse markets** and add candidates to your optimizer basket
+2. **Open Market Detail** for rates, risk warnings, and historical APY
+3. **Go to Optimize**, import wallet positions or use basket markets
+4. **Set parameters** and run all four strategies
+5. **Compare results** — allocations and projected yields (not a transaction plan)
 
 ## 🔧 Technical Specifications
 
@@ -206,6 +230,6 @@ Whether you're managing $1,000 or $1,000,000, our sophisticated optimization eng
 - **Earn more** through intelligent allocation
 - **Sleep better** with built-in safety limits
 - **Save time** with automated analysis
-- **Execute confidently** with clear step-by-step plans
+- **Execute confidently** with modeled allocation scenarios
 
 **Launch the optimizer today and start earning what you deserve!**
