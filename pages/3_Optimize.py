@@ -31,11 +31,12 @@ from lib.morpho_api import (
 from lib.optimizer import RebalanceOptimizer
 from lib.portfolio import (
     basket_market_ids,
+    clear_basket,
+    ensure_portfolio_text_has_basket,
     get_basket,
     handle_text_change,
     init_session_state,
     parse_market_ids_from_text,
-    sync_portfolio_text_from_basket,
 )
 from lib.ui.charts import (
     render_allocation_bars,
@@ -49,6 +50,7 @@ from lib.ui.theme import (
     render_page_header,
     render_simulation_banner,
 )
+from lib.ui.transfer_plan import render_execution_plan
 
 inject_theme()
 init_session_state()
@@ -77,25 +79,9 @@ if df_all.empty:
         st.rerun()
     st.stop()
 
-render_basket_sidebar(df_all)
+render_basket_sidebar(df_all, show_go_to_optimize=False)
 
-# --- Basket → portfolio text sync (preserve wallet section) ---
-if get_basket():
-    wallet_lines = []
-    current_text = st.session_state.get("portfolio_input_text", "")
-    if WALLET_SEP in current_text:
-        wallet_lines = [
-            ln
-            for ln in current_text.split(WALLET_SEP, 1)[1].split("\n")
-            if ln.strip() and MANUAL_SEP not in ln
-        ]
-    sync_portfolio_text_from_basket(df_all)
-    if wallet_lines:
-        st.session_state.portfolio_input_text = (
-            st.session_state.portfolio_input_text.rstrip()
-            + f"\n\n{WALLET_SEP}\n"
-            + "\n".join(wallet_lines)
-        )
+ensure_portfolio_text_has_basket(df_all)
 
 basket_ids = basket_market_ids(df_all)
 render_optimizer_basket(df_all)
@@ -182,6 +168,7 @@ if scan_clicked:
 if clear_all_clicked:
     st.session_state.portfolio_input_text = ""
     st.session_state.balance_cache = {}
+    clear_basket()
     st.success("All markets and balances cleared.")
     time.sleep(0.5)
     st.rerun()
@@ -920,3 +907,12 @@ if "opt_results" in st.session_state and st.session_state["opt_results"].get("be
             width="stretch",
             hide_index=True,
         )
+
+    render_execution_plan(
+        df_res,
+        df_all,
+        new_cash=new_cash,
+        rebalance_scope=rebalance_scope,
+        min_move_thresh=min_move_thresh,
+        total_stuck_usd=total_stuck_usd,
+    )

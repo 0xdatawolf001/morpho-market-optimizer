@@ -1,8 +1,11 @@
 """Monarch-inspired Streamlit theme and layout helpers."""
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 from lib.config import STRATEGY_COLORS
+
+_DESTRUCTIVE_BUTTON_LABELS = ("✕", "Remove", "Clear basket")
 
 
 def inject_theme():
@@ -76,9 +79,41 @@ def inject_theme():
                 grid-template-columns: repeat(2, 1fr);
             }}
         }}
+        section[data-testid="stSidebar"] [data-testid="stButton"] button.basket-remove-btn,
+        [data-testid="stAppViewContainer"] [data-testid="stButton"] button.basket-remove-btn {{
+            color: #ff5252 !important;
+            border-color: #ff5252 !important;
+        }}
+        section[data-testid="stSidebar"] [data-testid="stButton"] button.basket-remove-btn:hover,
+        [data-testid="stAppViewContainer"] [data-testid="stButton"] button.basket-remove-btn:hover {{
+            color: #ff5252 !important;
+            border-color: #ff5252 !important;
+            background: rgba(255, 82, 82, 0.12) !important;
+        }}
         </style>
         """,
         unsafe_allow_html=True,
+    )
+    labels_js = ", ".join(repr(label) for label in _DESTRUCTIVE_BUTTON_LABELS)
+    components.html(
+        f"""
+        <script>
+        (function () {{
+            const labels = new Set([{labels_js}]);
+            function markDestructiveButtons() {{
+                const root = window.parent.document;
+                root.querySelectorAll("button").forEach((btn) => {{
+                    const text = (btn.innerText || "").trim();
+                    if (labels.has(text)) btn.classList.add("basket-remove-btn");
+                }});
+            }}
+            markDestructiveButtons();
+            const observer = new MutationObserver(markDestructiveButtons);
+            observer.observe(window.parent.document.body, {{ childList: true, subtree: true }});
+        }})();
+        </script>
+        """,
+        height=0,
     )
 
 
@@ -151,7 +186,7 @@ def render_optimizer_basket(df_all, *, key_prefix: str = "opt"):
         c1, c2, c3 = st.columns([3, 2, 1], vertical_alignment="center")
         c1.markdown(f"**{label}**")
         c2.caption(sub)
-        if c3.button("Remove", key=f"{key_prefix}_rm_{bkey}", type="secondary"):
+        if c3.button("✕", key=f"{key_prefix}_rm_{bkey}", type="secondary", help="Remove from basket"):
             remove_market_from_optimizer(mid, chain_id_int)
             st.toast(f"Removed {label}")
             st.rerun()
@@ -167,7 +202,7 @@ def render_optimizer_basket(df_all, *, key_prefix: str = "opt"):
         st.rerun()
 
 
-def render_basket_sidebar(df_all):
+def render_basket_sidebar(df_all, *, show_go_to_optimize: bool = True):
     """Show optimizer basket in sidebar."""
     basket = st.session_state.get("optimizer_basket", [])
     count = len(basket)
@@ -188,7 +223,7 @@ def render_basket_sidebar(df_all):
         label = f"{mid[:8]}…" if row.empty else f"{row.iloc[0]['Loan Token']}/{row.iloc[0]['Collateral']}"
         c1, c2 = st.sidebar.columns([4, 1])
         c1.caption(label)
-        if c2.button("✕", key=f"rm_{key}"):
+        if c2.button("✕", key=f"rm_{key}", type="secondary", help="Remove from basket"):
             from lib.portfolio import remove_market_from_optimizer
 
             if ":" in key:
@@ -197,3 +232,12 @@ def render_basket_sidebar(df_all):
             else:
                 remove_market_from_optimizer(key)
             st.rerun()
+
+    st.sidebar.divider()
+    if show_go_to_optimize and st.sidebar.button(
+        "Go to Optimize →",
+        type="primary",
+        use_container_width=True,
+        key="sidebar_go_optimize",
+    ):
+        st.switch_page("pages/3_Optimize.py")

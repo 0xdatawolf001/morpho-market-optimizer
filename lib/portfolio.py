@@ -96,9 +96,7 @@ def remove_market_from_optimizer(market_id: str, chain_id: int | None = None):
         st.session_state.get("portfolio_input_text", ""),
         market_id,
     )
-    for key in list(st.session_state.balance_cache.keys()):
-        if key.lower() == market_id.lower():
-            del st.session_state.balance_cache[key]
+    _clear_balance_cache_for_market(market_id)
 
 
 def parse_basket_keys() -> list[tuple[int | None, str]]:
@@ -147,6 +145,67 @@ def parse_market_ids_from_text(raw_text: str) -> list[str]:
     return clean_ids
 
 
+def parse_manual_market_ids(raw_text: str) -> list[str]:
+    """Market IDs from the manual / basket section only (before wallet import block)."""
+    manual = raw_text.split(WALLET_SEP)[0] if WALLET_SEP in raw_text else raw_text
+    return parse_market_ids_from_text(manual)
+
+
+def _clear_balance_cache_for_market(market_id: str):
+    for key in list(st.session_state.balance_cache.keys()):
+        if key.lower() == market_id.lower():
+            del st.session_state.balance_cache[key]
+
+
+def sync_basket_from_manual_text(df_all):
+    """Keep optimizer basket aligned with the manual paste section."""
+    init_session_defaults()
+    raw = st.session_state.get("portfolio_input_text", "")
+    manual_ids = parse_manual_market_ids(raw)
+    new_keys: list[str] = []
+    for mid in manual_ids:
+        row = df_all[df_all["Market ID"].str.lower() == mid.lower()]
+        if not row.empty:
+            r = row.iloc[0]
+            new_keys.append(basket_key(r["Market ID"], int(r["ChainID"])))
+        else:
+            new_keys.append(basket_key(mid))
+
+    old_keys = set(st.session_state.optimizer_basket)
+    new_key_set = set(new_keys)
+    for key in old_keys - new_key_set:
+        mid = key.split(":", 1)[1] if ":" in key else key
+        _clear_balance_cache_for_market(mid)
+
+    st.session_state.optimizer_basket = new_keys
+
+
+def ensure_portfolio_text_has_basket(df_all):
+    """Add basket markets to paste text without overwriting user removals."""
+    if not get_basket():
+        return
+    manual_ids = {m.lower() for m in parse_manual_market_ids(st.session_state.get("portfolio_input_text", ""))}
+    basket_ids = {m.lower() for m in basket_market_ids(df_all)}
+    if basket_ids <= manual_ids:
+        return
+
+    wallet_lines = []
+    current_text = st.session_state.get("portfolio_input_text", "")
+    if WALLET_SEP in current_text:
+        wallet_lines = [
+            ln
+            for ln in current_text.split(WALLET_SEP, 1)[1].split("\n")
+            if ln.strip() and MANUAL_SEP not in ln
+        ]
+    sync_portfolio_text_from_basket(df_all)
+    if wallet_lines:
+        st.session_state.portfolio_input_text = (
+            st.session_state.portfolio_input_text.rstrip()
+            + f"\n\n{WALLET_SEP}\n"
+            + "\n".join(wallet_lines)
+        )
+
+
 def sync_portfolio_text_from_basket(df_all):
     ids = basket_market_ids(df_all)
     if not ids:
@@ -164,6 +223,7 @@ def sync_portfolio_text_from_basket(df_all):
 def handle_text_change(df_all):
     raw_text = st.session_state.get("portfolio_input_text", "")
     if not raw_text or not raw_text.strip():
+        st.session_state.optimizer_basket = []
         return
 
     if WALLET_SEP in raw_text:
@@ -200,3 +260,4 @@ def handle_text_change(df_all):
         new_parts.extend(wallet_lines)
 
     st.session_state.portfolio_input_text = "\n".join(new_parts).strip()
+    sync_basket_from_manual_text(df_all)
