@@ -117,6 +117,56 @@ def render_simulation_banner():
     )
 
 
+def render_optimizer_basket(df_all, *, key_prefix: str = "opt"):
+    """Editable optimizer basket with per-market remove actions."""
+    from lib.portfolio import get_basket, remove_market_from_optimizer
+
+    basket = get_basket()
+    if not basket:
+        st.info("No markets in basket. Add markets from the Markets page or Market Detail.")
+        return
+
+    st.markdown(f"**Optimizer basket ({len(basket)})**")
+    for bkey in basket:
+        if ":" in bkey:
+            chain_id, mid = bkey.split(":", 1)
+            row = df_all[
+                (df_all["Market ID"].str.lower() == mid.lower())
+                & (df_all["ChainID"] == int(chain_id))
+            ]
+            chain_id_int = int(chain_id)
+        else:
+            mid = bkey
+            row = df_all[df_all["Market ID"].str.lower() == mid.lower()]
+            chain_id_int = int(row.iloc[0]["ChainID"]) if not row.empty else None
+
+        if row.empty:
+            label = f"{mid[:10]}…"
+            sub = "Unknown market"
+        else:
+            r = row.iloc[0]
+            label = f"{r['Loan Token']}/{r['Collateral']}"
+            sub = f"{r['Chain']} · {r['Supply APY']:.2%} supply APY"
+
+        c1, c2, c3 = st.columns([3, 2, 1], vertical_alignment="center")
+        c1.markdown(f"**{label}**")
+        c2.caption(sub)
+        if c3.button("Remove", key=f"{key_prefix}_rm_{bkey}", type="secondary"):
+            remove_market_from_optimizer(mid, chain_id_int)
+            st.toast(f"Removed {label}")
+            st.rerun()
+
+    if st.button("Clear basket", key=f"{key_prefix}_clear_basket", type="secondary"):
+        for bkey in list(basket):
+            if ":" in bkey:
+                chain_id, mid = bkey.split(":", 1)
+                remove_market_from_optimizer(mid, int(chain_id))
+            else:
+                remove_market_from_optimizer(bkey)
+        st.toast("Cleared optimizer basket")
+        st.rerun()
+
+
 def render_basket_sidebar(df_all):
     """Show optimizer basket in sidebar."""
     basket = st.session_state.get("optimizer_basket", [])
@@ -139,7 +189,11 @@ def render_basket_sidebar(df_all):
         c1, c2 = st.sidebar.columns([4, 1])
         c1.caption(label)
         if c2.button("✕", key=f"rm_{key}"):
-            from lib.portfolio import remove_from_basket
+            from lib.portfolio import remove_market_from_optimizer
 
-            remove_from_basket(key)
+            if ":" in key:
+                chain_str, mid = key.split(":", 1)
+                remove_market_from_optimizer(mid, int(chain_str))
+            else:
+                remove_market_from_optimizer(key)
             st.rerun()

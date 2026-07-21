@@ -35,11 +35,13 @@ def basket_key(market_id: str, chain_id: int | None = None) -> str:
     return market_id.lower()
 
 
-def add_to_basket(market_id: str, chain_id: int | None = None):
+def add_to_basket(market_id: str, chain_id: int | None = None) -> bool:
     init_session_defaults()
     key = basket_key(market_id, chain_id)
     if key not in st.session_state.optimizer_basket:
         st.session_state.optimizer_basket.append(key)
+        return True
+    return False
 
 
 def remove_from_basket(key: str):
@@ -49,6 +51,54 @@ def remove_from_basket(key: str):
 
 def clear_basket():
     st.session_state.optimizer_basket = []
+
+
+def _strip_market_from_text(raw_text: str, market_id: str) -> str:
+    """Remove one market ID line from portfolio paste text (manual + wallet sections)."""
+    mid = market_id.lower()
+    kept = []
+    for line in raw_text.split("\n"):
+        if line.strip() in (MANUAL_SEP, WALLET_SEP):
+            kept.append(line)
+            continue
+        clean = line.split("--")[0].strip()
+        if not clean:
+            continue
+        extracted = extract_market_id_from_monarch_link(clean).lower()
+        if extracted == mid:
+            continue
+        kept.append(line)
+
+    # Drop dangling section headers when a section becomes empty.
+    out: list[str] = []
+    i = 0
+    while i < len(kept):
+        line = kept[i]
+        if line.strip() in (MANUAL_SEP, WALLET_SEP):
+            j = i + 1
+            while j < len(kept) and kept[j].strip() not in (MANUAL_SEP, WALLET_SEP):
+                if kept[j].strip():
+                    break
+                j += 1
+            if j >= len(kept) or kept[j].strip() in (MANUAL_SEP, WALLET_SEP):
+                i += 1
+                continue
+        out.append(line)
+        i += 1
+    return "\n".join(out).strip()
+
+
+def remove_market_from_optimizer(market_id: str, chain_id: int | None = None):
+    """Remove a market from basket, portfolio text, and balance cache."""
+    init_session_defaults()
+    remove_from_basket(basket_key(market_id, chain_id))
+    st.session_state.portfolio_input_text = _strip_market_from_text(
+        st.session_state.get("portfolio_input_text", ""),
+        market_id,
+    )
+    for key in list(st.session_state.balance_cache.keys()):
+        if key.lower() == market_id.lower():
+            del st.session_state.balance_cache[key]
 
 
 def parse_basket_keys() -> list[tuple[int | None, str]]:

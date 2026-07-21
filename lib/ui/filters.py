@@ -21,9 +21,8 @@ def count_active_filters(filters: dict) -> int:
         count += 1
     if filters.get("collaterals"):
         count += 1
-    for chip in ("high_apy", "deep_liq", "whitelisted", "low_util"):
-        if filters.get(chip):
-            count += 1
+    if filters.get("whitelisted"):
+        count += 1
     if filters.get("hide_warnings"):
         count += 1
     if filters.get("min_apy", 0) > 0 or filters.get("max_apy", 1000) < 1000:
@@ -56,18 +55,8 @@ def apply_market_filters(df: pd.DataFrame, filters: dict) -> pd.DataFrame:
     if filters.get("collaterals"):
         out = out[out["Collateral"].isin(filters["collaterals"])]
 
-    if filters.get("high_apy") and not out.empty:
-        threshold = out["Supply APY"].quantile(0.75)
-        out = out[out["Supply APY"] >= threshold]
-
-    if filters.get("deep_liq"):
-        out = out[out["Available Liquidity (USD)"] >= 1_000_000]
-
     if filters.get("whitelisted"):
         out = out[out["Whitelisted"]]
-
-    if filters.get("low_util"):
-        out = out[out["Utilization"] <= 0.5]
 
     if filters.get("hide_warnings"):
         out = out[out["Warnings"].apply(lambda w: len(w) == 0 if isinstance(w, list) else True)]
@@ -125,13 +114,10 @@ def render_filter_bar(df_all: pd.DataFrame) -> dict:
     with r1c2:
         sel_colls = st.multiselect("Collateral tokens", options=collateral_symbols, key="mkt_colls")
 
-    chip_cols = st.columns(4)
-    high_apy = chip_cols[0].checkbox("High Supply APY", key="chip_high_apy")
-    deep_liq = chip_cols[1].checkbox("Deep Liquidity", key="chip_deep_liq")
-    whitelisted = chip_cols[2].checkbox("Whitelisted", key="chip_whitelist")
-    low_util = chip_cols[3].checkbox("Low Utilization", key="chip_low_util")
-
     with st.expander("Advanced filters"):
+        w1, w2 = st.columns(2)
+        whitelisted = w1.checkbox("Whitelisted only", value=False, key="adv_whitelist")
+        hide_warnings = w2.checkbox("Hide markets with warnings", value=False, key="adv_hide_warn")
         a1, a2 = st.columns(2)
         min_apy = a1.number_input("Min APY %", 0.0, 1000.0, 0.0, key="adv_min_apy")
         max_apy = a2.number_input("Max APY %", 0.0, 1000.0, 1000.0, key="adv_max_apy")
@@ -141,17 +127,13 @@ def render_filter_bar(df_all: pd.DataFrame) -> dict:
         s1, s2 = st.columns(2)
         min_supply = s1.number_input("Min Total Supply (USD)", 0.0, 10_000_000_000.0, 0.0, key="adv_min_supply")
         min_liquidity = s2.number_input("Min Liquidity (USD)", 0.0, 10_000_000_000.0, 0.0, key="adv_min_liq")
-        hide_warnings = st.checkbox("Hide markets with warnings", key="adv_hide_warn")
 
     filters = {
         "search": search,
         "chains": [chain_sel] if chain_sel != "All" else [],
         "loans": sel_loans,
         "collaterals": sel_colls,
-        "high_apy": high_apy,
-        "deep_liq": deep_liq,
         "whitelisted": whitelisted,
-        "low_util": low_util,
         "hide_warnings": hide_warnings,
         "min_apy": min_apy,
         "max_apy": max_apy,
@@ -168,7 +150,7 @@ def render_filter_bar(df_all: pd.DataFrame) -> dict:
     b1.caption(f"**{active}** active filter{'s' if active != 1 else ''}")
     if b2.button("Clear all filters", key="clear_filters"):
         for k in list(st.session_state.keys()):
-            if k.startswith(("mkt_", "chip_", "adv_")):
+            if k.startswith(("mkt_", "adv_")):
                 del st.session_state[k]
         st.rerun()
 

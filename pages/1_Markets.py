@@ -6,7 +6,12 @@ import streamlit as st
 from lib.morpho_api import ensure_market_index, refresh_market_index
 from lib.portfolio import init_session_defaults
 from lib.ui.filters import apply_market_filters, paginate_df, render_filter_bar
-from lib.ui.market_cards import render_market_table, render_row_actions
+from lib.ui.market_cards import (
+    render_market_table,
+    render_row_actions,
+    render_selection_toolbar,
+    remember_table_selection,
+)
 from lib.ui.theme import inject_theme, render_basket_sidebar, render_page_header, render_summary_cards
 
 inject_theme()
@@ -62,13 +67,17 @@ render_summary_cards(
     ]
 )
 
-df_page = paginate_df(df_filtered)
-selection = render_market_table(df_page)
-render_row_actions(df_page, selection)
-
-foot1, foot2 = st.columns([3, 1])
-foot1.caption("Data source: Morpho GraphQL API")
-if foot2.button("Refresh index", key="refresh_markets"):
+tbl_hdr, tbl_refresh = st.columns([4, 1])
+tbl_hdr.markdown("**Markets**")
+if tbl_refresh.button("Refresh index", key="refresh_markets", use_container_width=True):
     st.session_state.market_dict = refresh_market_index()
     st.toast("Market index refreshed")
     st.rerun()
+
+df_page = paginate_df(df_filtered)
+render_selection_toolbar()
+selection = render_market_table(df_page)
+remember_table_selection(df_page, selection)
+render_row_actions(df_page, selection)
+
+st.caption("Data source: Morpho GraphQL API")

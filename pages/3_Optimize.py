@@ -42,7 +42,13 @@ from lib.ui.charts import (
     render_convergence_chart,
     render_efficiency_frontier,
 )
-from lib.ui.theme import inject_theme, render_page_header, render_simulation_banner
+from lib.ui.theme import (
+    inject_theme,
+    render_basket_sidebar,
+    render_optimizer_basket,
+    render_page_header,
+    render_simulation_banner,
+)
 
 inject_theme()
 init_session_state()
@@ -71,6 +77,8 @@ if df_all.empty:
         st.rerun()
     st.stop()
 
+render_basket_sidebar(df_all)
+
 # --- Basket → portfolio text sync (preserve wallet section) ---
 if get_basket():
     wallet_lines = []
@@ -90,16 +98,7 @@ if get_basket():
         )
 
 basket_ids = basket_market_ids(df_all)
-if basket_ids:
-    labels = []
-    for mid in basket_ids:
-        row = df_all[df_all["Market ID"].str.lower() == mid.lower()]
-        labels.append(
-            f"{row.iloc[0]['Loan Token']}/{row.iloc[0]['Collateral']}"
-            if not row.empty
-            else mid[:10] + "…"
-        )
-    st.caption(f"**Basket ({len(basket_ids)}):** " + " · ".join(labels))
+render_optimizer_basket(df_all)
 
 # =============================================================================
 # 1. Portfolio

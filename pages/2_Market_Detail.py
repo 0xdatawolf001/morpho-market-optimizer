@@ -6,16 +6,36 @@ import pandas as pd
 import streamlit as st
 
 from lib.config import monarch_link
-from lib.morpho_api import fetch_market_detail, fetch_market_historical
-from lib.portfolio import add_to_basket, init_session_defaults
+from lib.morpho_api import ensure_market_index, fetch_market_detail, fetch_market_historical
+from lib.portfolio import add_to_basket, get_basket, init_session_defaults
 from lib.ui.charts import build_historical_line_chart, historical_series_to_df
-from lib.ui.theme import inject_theme, render_empty_state, render_page_header
+from lib.ui.navigation import go_to_markets, go_to_optimize
+from lib.ui.theme import inject_theme, render_basket_sidebar, render_empty_state, render_page_header
 
 inject_theme()
 init_session_defaults()
 
+if get_basket():
+    try:
+        render_basket_sidebar(ensure_market_index())
+    except RuntimeError:
+        pass
+
 chain_id = st.query_params.get("chain_id")
 market_id = st.query_params.get("market_id")
+
+if chain_id and market_id:
+    try:
+        st.session_state.detail_market = {
+            "chain_id": int(chain_id),
+            "market_id": market_id,
+        }
+    except ValueError:
+        pass
+elif st.session_state.get("detail_market"):
+    cached = st.session_state.detail_market
+    chain_id = str(cached["chain_id"])
+    market_id = cached["market_id"]
 
 if not chain_id or not market_id:
     render_empty_state(
@@ -23,7 +43,8 @@ if not chain_id or not market_id:
         "Open a market from the Markets page or add ?chain_id=&market_id= to the URL.",
     )
     if st.button("Browse markets"):
-        st.switch_page("pages/1_Markets.py")
+        st.session_state.pop("detail_market", None)
+        go_to_markets()
     st.stop()
 
 try:
@@ -38,10 +59,18 @@ with st.spinner("Loading market details…"):
 if not detail:
     st.error("Market not found. It may be on an unsupported chain or the ID is incorrect.")
     if st.button("Back to Markets"):
-        st.switch_page("pages/1_Markets.py")
+        go_to_markets()
     st.stop()
 
 label = detail["Market Label"]
+nav1, nav2 = st.columns([1, 5])
+with nav1:
+    if st.button("← Markets", key="back_to_markets"):
+        st.session_state.pop("detail_market", None)
+        go_to_markets()
+with nav2:
+    st.caption(f"Markets / **{label}**")
+
 st.markdown(f"### {label}")
 badges = f"**{detail['Chain']}** · `{market_id[:12]}…`"
 if detail.get("Whitelisted"):
@@ -64,10 +93,12 @@ s6.markdown(f"[Open in Monarch]({monarch_link(chain_id_int, market_id)})")
 
 c1, c2 = st.columns([1, 3])
 if c1.button("Add to Optimizer", type="primary"):
-    add_to_basket(market_id, chain_id_int)
-    st.toast(f"Added {label} to optimizer basket")
+    if add_to_basket(market_id, chain_id_int):
+        st.toast(f"Added {label} to optimizer basket")
+    else:
+        st.toast(f"{label} is already in the optimizer basket")
 if c2.button("Go to Optimize page"):
-    st.switch_page("pages/3_Optimize.py")
+    go_to_optimize()
 
 tab_overview, tab_rates, tab_risk = st.tabs(["Overview", "Rates", "Risk"])
 

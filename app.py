@@ -9,14 +9,11 @@ st.set_page_config(page_title="Morpho Market Optimizer", layout="wide", page_ico
 inject_theme()
 init_session_defaults()
 
-has_market = bool(st.query_params.get("market_id"))
-
 pages = [
     st.Page("pages/1_Markets.py", title="Markets", icon="🔍", default=True),
-    st.Page("pages/3_Optimize.py", title="Optimize", icon="⚖️"),
+    st.Page("pages/2_Market_Detail.py", title="Market", icon="📊", url_path="market"),
+    st.Page("pages/3_Optimize.py", title="Optimize", icon="⚖️", url_path="optimize"),
 ]
-if has_market:
-    pages.insert(1, st.Page("pages/2_Market_Detail.py", title="Market", icon="📊"))
 
 pg = st.navigation(pages)
 pg.run()
