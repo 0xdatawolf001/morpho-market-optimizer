@@ -17,11 +17,7 @@ if "morpho_api_base" not in st.session_state:
 
 
 def main() -> int:
-    from lib.morpho_api import (
-        fetch_market_detail,
-        fetch_market_historical,
-        get_market_dictionary,
-    )
+    from lib.morpho_api import get_market_dictionary
 
     print("1. Fetching market index…")
     get_market_dictionary.clear()
@@ -33,19 +29,8 @@ def main() -> int:
     print(f"   OK: {len(df):,} markets loaded via {st.session_state.get('morpho_api_base')}")
 
     sample = df.iloc[0]
-    chain_id = int(sample["ChainID"])
-    market_id = sample["Market ID"]
-    print(f"2. Fetching market detail for {sample['Market Label']}…")
-    detail = fetch_market_detail(chain_id, market_id)
-    if not detail:
-        print("FAIL: market detail returned None")
-        return 1
-    print(f"   OK: supply APY {detail['Supply APY']:.2%}")
-
-    print("3. Fetching 30d historical series…")
-    hist = fetch_market_historical(chain_id, market_id, days=30)
-    series_count = sum(1 for v in hist.values() if v)
-    print(f"   OK: {series_count} non-empty series")
+    print(f"2. Sample market: {sample['Market Label']} on {sample['Chain']}")
+    print(f"   OK: supply APY {sample['Supply APY']:.2%}")
 
     print("\nAll smoke tests passed.")
     return 0

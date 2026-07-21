@@ -6,12 +6,7 @@ import streamlit as st
 from lib.morpho_api import ensure_market_index, refresh_market_index
 from lib.portfolio import init_session_defaults
 from lib.ui.filters import apply_market_filters, paginate_df, render_filter_bar
-from lib.ui.market_cards import (
-    render_market_table,
-    render_row_actions,
-    render_selection_toolbar,
-    remember_table_selection,
-)
+from lib.ui.market_cards import render_market_table, render_row_actions
 from lib.ui.theme import inject_theme, render_basket_sidebar, render_page_header, render_summary_cards
 
 inject_theme()
@@ -75,9 +70,7 @@ if tbl_refresh.button("Refresh index", key="refresh_markets", use_container_widt
     st.rerun()
 
 df_page = paginate_df(df_filtered)
-render_selection_toolbar()
 selection = render_market_table(df_page)
-remember_table_selection(df_page, selection)
 render_row_actions(df_page, selection)
 
 st.caption("Data source: Morpho GraphQL API")

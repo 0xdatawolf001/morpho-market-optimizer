@@ -123,7 +123,7 @@ def render_optimizer_basket(df_all, *, key_prefix: str = "opt"):
 
     basket = get_basket()
     if not basket:
-        st.info("No markets in basket. Add markets from the Markets page or Market Detail.")
+        st.info("No markets in basket. Add markets from the Markets page.")
         return
 
     st.markdown(f"**Optimizer basket ({len(basket)})**")
@@ -173,7 +173,7 @@ def render_basket_sidebar(df_all):
     count = len(basket)
     st.sidebar.caption(f"Optimizer basket: **{count}** market{'s' if count != 1 else ''}")
     if not basket:
-        st.sidebar.info("Add markets from Discovery or Market Detail.")
+        st.sidebar.info("Add markets from the Markets page.")
         return
     for key in basket:
         if ":" in key:

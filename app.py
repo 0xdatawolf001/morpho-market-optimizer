@@ -11,7 +11,6 @@ init_session_defaults()
 
 pages = [
     st.Page("pages/1_Markets.py", title="Markets", icon="🔍", default=True),
-    st.Page("pages/2_Market_Detail.py", title="Market", icon="📊", url_path="market"),
     st.Page("pages/3_Optimize.py", title="Optimize", icon="⚖️", url_path="optimize"),
 ]
 

@@ -1,7 +1,5 @@
 """Morpho GraphQL fetch layer with Streamlit caching."""
 
-from datetime import datetime, timezone
-
 import pandas as pd
 import requests
 import streamlit as st
@@ -54,51 +52,6 @@ MARKET_INDEX_FIELDS = """
     timestamp
     apyAtTarget
     rateAtTarget
-  }
-"""
-
-MARKET_DETAIL_FIELDS = """
-  marketId
-  listed
-  lltv
-  irmAddress
-  oracle { address }
-  loanAsset {
-    address
-    symbol
-    decimals
-    price { usd }
-    chain { id }
-  }
-  collateralAsset {
-    address
-    symbol
-    decimals
-  }
-  supplyingVaults { address }
-  warnings { type level }
-  realizedBadDebt { underlying usd }
-  badDebt { underlying usd }
-  state {
-    supplyApy
-    borrowApy
-    utilization
-    supplyAssets
-    borrowAssets
-    supplyAssetsUsd
-    borrowAssetsUsd
-    liquidityAssetsUsd
-    collateralAssetsUsd
-    fee
-    timestamp
-    apyAtTarget
-    rateAtTarget
-    dailySupplyApy
-    dailyBorrowApy
-    weeklySupplyApy
-    weeklyBorrowApy
-    monthlySupplyApy
-    monthlyBorrowApy
   }
 """
 
@@ -224,12 +177,6 @@ def _process_market_row(m: dict) -> dict | None:
         "Oracle Address": oracle.get("address"),
         "Fee": safe_float(state.get("fee")) / 1e18 if safe_float(state.get("fee")) > 1 else safe_float(state.get("fee")),
         "APY at Target": safe_float(state.get("apyAtTarget")),
-        "Daily Supply APY": safe_float(state.get("dailySupplyApy")),
-        "Daily Borrow APY": safe_float(state.get("dailyBorrowApy")),
-        "Weekly Supply APY": safe_float(state.get("weeklySupplyApy")),
-        "Weekly Borrow APY": safe_float(state.get("weeklyBorrowApy")),
-        "Monthly Supply APY": safe_float(state.get("monthlySupplyApy")),
-        "Monthly Borrow APY": safe_float(state.get("monthlyBorrowApy")),
         "Bad Debt (USD)": safe_float(bad_debt.get("usd")),
         "Realized Bad Debt (USD)": safe_float(realized_bad.get("usd")),
         "Warnings": warning_types,
@@ -390,56 +337,6 @@ def fetch_user_positions(user_address: str, price_lookup: dict | None = None) ->
     except Exception as exc:
         st.error(f"Error parsing user positions: {exc}")
     return positions
-
-
-@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
-def fetch_market_detail(chain_id: int, market_id: str) -> dict | None:
-    query = f"""
-    query GetMarketDetail($uniqueKey: String!, $chainId: Int!) {{
-      marketByUniqueKey: marketById(marketId: $uniqueKey, chainId: $chainId) {{
-        {MARKET_DETAIL_FIELDS}
-      }}
-    }}
-    """
-    try:
-        data = _gql(query, {"uniqueKey": market_id, "chainId": int(chain_id)})
-        raw = data.get("marketByUniqueKey")
-        if not raw:
-            return None
-        row = _process_market_row(raw)
-        if row:
-            row["_raw"] = raw
-        return row
-    except Exception:
-        return None
-
-
-@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
-def fetch_market_historical(chain_id: int, market_id: str, days: int = 30) -> dict:
-    query = """
-    query getMarketHistoricalData($uniqueKey: String!, $options: TimeseriesOptions!, $chainId: Int!) {
-      marketByUniqueKey: marketById(marketId: $uniqueKey, chainId: $chainId) {
-        historicalState {
-          supplyApy(options: $options) { x y }
-          borrowApy(options: $options) { x y }
-          utilization(options: $options) { x y }
-          liquidityAssetsUsd(options: $options) { x y }
-        }
-      }
-    }
-    """
-    end = int(datetime.now(timezone.utc).timestamp())
-    start = end - days * 86400
-    variables = {
-        "uniqueKey": market_id,
-        "chainId": int(chain_id),
-        "options": {"startTimestamp": start, "endTimestamp": end, "interval": "DAY"},
-    }
-    try:
-        data = _gql(query, variables)
-        return data.get("marketByUniqueKey", {}).get("historicalState") or {}
-    except Exception:
-        return {}
 
 
 def ensure_market_index() -> pd.DataFrame:

@@ -1,6 +1,6 @@
 # Morpho Market Optimizer
 
-An informational Streamlit app for **discovering Morpho markets**, inspecting market details, and running **what-if portfolio optimization** across four strategies. Results are simulations only — no rebalancing or transaction execution.
+An informational Streamlit app for **discovering Morpho markets** and running **what-if portfolio optimization** across four strategies. Results are simulations only — no rebalancing or transaction execution.
 
 ## Quick start
 
@@ -9,11 +9,10 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-## App flow (3 pages)
+## App flow (2 pages)
 
 1. **Markets** — Monarch-inspired discovery: live search/filters, sort, pagination, row selection, optimizer basket
-2. **Market** — Deep-linkable detail view (`?chain_id=&market_id=`): overview, rolling APYs, 30d charts, risk/warnings
-3. **Optimize** — Wallet import, portfolio editor, parameters, four-strategy simulation, charts and allocation tables
+2. **Optimize** — Wallet import, portfolio editor, parameters, four-strategy simulation, charts and allocation tables
 
 Data source: **Morpho GraphQL only** (`api.morpho.org`).
 
@@ -165,17 +164,15 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-### Three-page workflow
-1. **Markets** — live filters, search, sort, pagination; select rows to view detail or add to the optimizer basket
-2. **Market Detail** — deep-link via `?chain_id=&market_id=`; Overview, Rates, and Risk tabs with historical charts
-3. **Optimize** — basket-driven portfolio input, wallet import, four strategies, charts and allocation tables (simulation only)
+### Two-page workflow
+1. **Markets** — live filters, search, sort, pagination; select rows to add to the optimizer basket
+2. **Optimize** — basket-driven portfolio input, wallet import, four strategies, charts and allocation tables (simulation only)
 
 ### Quick Start Guide
 1. **Browse markets** and add candidates to your optimizer basket
-2. **Open Market Detail** for rates, risk warnings, and historical APY
-3. **Go to Optimize**, import wallet positions or use basket markets
-4. **Set parameters** and run all four strategies
-5. **Compare results** — allocations and projected yields (not a transaction plan)
+2. **Go to Optimize**, import wallet positions or use basket markets
+3. **Set parameters** and run all four strategies
+4. **Compare results** — allocations and projected yields (not a transaction plan)
 
 ## 🔧 Technical Specifications
 

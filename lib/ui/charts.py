@@ -1,6 +1,4 @@
-"""Altair chart builders for optimization and market detail."""
-
-from datetime import datetime, timezone
+"""Altair chart builders for optimization results."""
 
 import altair as alt
 import pandas as pd
@@ -78,19 +76,6 @@ def build_allocation_chart(bar_data: list[dict]):
     )
 
 
-def historical_series_to_df(series: list[dict] | None, value_name: str) -> pd.DataFrame:
-    if not series:
-        return pd.DataFrame(columns=["date", value_name])
-    rows = []
-    for pt in series:
-        ts = pt.get("x")
-        val = pt.get("y")
-        if ts is None:
-            continue
-        rows.append({"date": datetime.fromtimestamp(int(ts), tz=timezone.utc), value_name: float(val or 0)})
-    return pd.DataFrame(rows)
-
-
 def render_efficiency_frontier(df_scatter: pd.DataFrame, highlights: pd.DataFrame):
     chart = build_efficiency_frontier_chart(df_scatter, highlights)
     if chart is None:
@@ -111,17 +96,3 @@ def render_allocation_bars(bar_data: list[dict]):
     else:
         st.altair_chart(chart, use_container_width=True)
 
-
-def build_historical_line_chart(df: pd.DataFrame, y_field: str, title: str, fmt: str = ".2%"):
-    if df.empty:
-        return None
-    return (
-        alt.Chart(df)
-        .mark_line()
-        .encode(
-            x=alt.X("date:T", title="Date"),
-            y=alt.Y(f"{y_field}:Q", title=title, axis=alt.Axis(format=fmt)),
-            tooltip=["date:T", alt.Tooltip(f"{y_field}:Q", format=fmt)],
-        )
-        .properties(height=220)
-    )
